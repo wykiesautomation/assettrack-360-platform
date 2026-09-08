@@ -19,44 +19,25 @@ _calibration_schema_ready=False
 
 @bp.before_app_request
 def ensure_calibration_schema():
-    """Idempotently align optional columns on PostgreSQL and local SQLite."""
     global _calibration_schema_ready
-    if _calibration_schema_ready:
-        return None
+    if _calibration_schema_ready:return None
+    statements=[
+        "ALTER TABLE signal_definition ADD COLUMN IF NOT EXISTS calibration_mode VARCHAR(30) NOT NULL DEFAULT 'LINEAR'",
+        'ALTER TABLE signal_definition ADD COLUMN IF NOT EXISTS "offset" DOUBLE PRECISION NOT NULL DEFAULT 0',
+        "ALTER TABLE signal_definition ADD COLUMN IF NOT EXISTS filter_alpha DOUBLE PRECISION NOT NULL DEFAULT 1",
+        "ALTER TABLE signal_definition ADD COLUMN IF NOT EXISTS deadband DOUBLE PRECISION NOT NULL DEFAULT 0",
+        "ALTER TABLE signal_definition ADD COLUMN IF NOT EXISTS calibrated_at TIMESTAMPTZ",
+        "ALTER TABLE signal_definition ADD COLUMN IF NOT EXISTS calibrated_by INTEGER",
+        'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS password_reset_nonce VARCHAR(80)',
+        'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS password_reset_sent_at TIMESTAMPTZ',
+        'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ',
+        'CREATE INDEX IF NOT EXISTS ix_user_password_reset_nonce ON "user"(password_reset_nonce)',
+    ]
     try:
-        inspector=inspect(db.engine)
-        table_names=set(inspector.get_table_names())
-        migrations={
-            'signal_definition':{
-                'calibration_mode':"VARCHAR(30) NOT NULL DEFAULT 'LINEAR'",
-                'offset':'DOUBLE PRECISION NOT NULL DEFAULT 0',
-                'filter_alpha':'DOUBLE PRECISION NOT NULL DEFAULT 1',
-                'deadband':'DOUBLE PRECISION NOT NULL DEFAULT 0',
-                'calibrated_at':'TIMESTAMP',
-                'calibrated_by':'INTEGER',
-            },
-            'user':{
-                'password_reset_nonce':'VARCHAR(80)',
-                'password_reset_sent_at':'TIMESTAMP',
-                'password_changed_at':'TIMESTAMP',
-            },
-        }
-        with db.engine.begin() as connection:
-            for table_name, definitions in migrations.items():
-                if table_name not in table_names:
-                    continue
-                columns={column['name'] for column in inspector.get_columns(table_name)}
-                quoted='"user"' if table_name=='user' else table_name
-                for column_name, definition in definitions.items():
-                    if column_name not in columns:
-                        column_sql='"offset"' if column_name=='offset' else column_name
-                        connection.execute(text(f'ALTER TABLE {quoted} ADD COLUMN {column_sql} {definition}'))
-            if 'user' in table_names:
-                connection.execute(text('CREATE INDEX IF NOT EXISTS ix_user_password_reset_nonce ON "user"(password_reset_nonce)'))
-        _calibration_schema_ready=True
+        for statement in statements:db.session.execute(text(statement))
+        db.session.commit();_calibration_schema_ready=True
     except Exception:
-        db.session.rollback()
-        current_app.logger.exception('Calibration schema migration failed safely')
+        db.session.rollback();current_app.logger.exception('Calibration schema migration failed')
     return None
 
 def utcnow(): return datetime.now(timezone.utc)
@@ -431,18 +412,13 @@ def enforce_subscription_access():
     allowed,sub=entitlement_for(current_user.customer_id)
     if not allowed:return redirect(url_for('main.subscription_required'))
 
+@bp.get('/fleet-tracking-south-africa')
 @bp.get('/mobile-phone-tracking')
+@bp.get('/vehicle-gps-tracking')
 @bp.get('/asset-monitoring')
 @bp.get('/industrial-sensor-monitoring')
+@bp.get('/fleet-tracking-api')
 @bp.get('/security-privacy')
-@bp.get('/industrial-asset-monitoring')
-@bp.get('/tank-level-monitoring')
-@bp.get('/device-engineering-studio')
-@bp.get('/diesel-security')
-@bp.get('/opc-ua-monitoring')
-@bp.get('/modbus-monitoring')
-@bp.get('/about')
-@bp.get('/contact')
 def seo_public_page():
     slug=request.path.strip('/')
     rendered=render_seo_page(slug)
@@ -796,7 +772,7 @@ def dashboard():
     assets=Asset.query.filter_by(customer_id=tenant_id()).order_by(Asset.name).all()
     sites=Site.query.filter_by(customer_id=tenant_id()).order_by(Site.name).all()
     devices=Device.query.filter_by(customer_id=tenant_id(),active=True).all()
-    now=utcnow(); counts={'HEALTHY':0,'ONLINE':0,'DELAYED':0,'NEVER_SEEN':0,'WARNING':0,'CRITICAL':0,'OFFLINE':0,'UNASSIGNED':0}; cards=[]; attention=[]; mapped=[]
+    now=utcnow(); counts={'HEALTHY':0,'WARNING':0,'CRITICAL':0,'OFFLINE':0,'UNASSIGNED':0}; cards=[]; attention=[]; mapped=[]
     tank_capacity=tank_volume=0.0; tank_count=low_count=0
     for asset in assets:
         status=asset_status(asset);asset.status=status;counts[status]=counts.get(status,0)+1
@@ -832,8 +808,7 @@ def dashboard():
         loc=Location.query.filter_by(customer_id=tenant_id(),asset_id=asset.id).order_by(desc(Location.sampled_at)).first()
         device_fresh=bool(device and device.last_seen and now-aware(device.last_seen)<=timedelta(minutes=30))
         if loc and device_fresh:mapped.append({'id':asset.id,'name':asset.name,'type':asset.asset_type,'status':status,'lat':loc.latitude,'lon':loc.longitude})
-    counts['HEALTHY']=counts.get('ONLINE',0)
-    order={'CRITICAL':0,'WARNING':1,'DELAYED':2,'OFFLINE':3,'NEVER_SEEN':4};attention.sort(key=lambda x:order.get(x['status'],9))
+    order={'CRITICAL':0,'WARNING':1,'OFFLINE':2};attention.sort(key=lambda x:order.get(x['status'],9))
     recent=[]
     for alarm in Alarm.query.filter_by(customer_id=tenant_id()).order_by(desc(Alarm.opened_at)).limit(8):
         a=db.session.get(Asset,alarm.asset_id);recent.append({'title':alarm.message,'detail':f'{a.name if a else "Asset"} · {alarm.severity} · {alarm.state}','time':aware(alarm.opened_at).strftime('%d %b %H:%M')})
@@ -2031,7 +2006,9 @@ def device_onboarding_status(registration_id):
     reg=MobileTrackerRegistration.query.filter_by(id=registration_id,customer_id=tenant_id()).first_or_404()
     is_hardware=(reg.onboarding_kind=='HARDWARE') or bool(reg.profile_code)
     final_uid=reg.claimed_board_id if is_hardware else reg.device_uid
-    device=Device.query.filter_by(customer_id=tenant_id(),asset_id=reg.asset_id,device_uid=final_uid,active=True).order_by(desc(Device.id)).first() if final_uid else None
+    device=Device.query.filter_by(customer_id=tenant_id(),device_uid=final_uid,active=True).order_by(desc(Device.id)).first() if final_uid else None
+    if device and device.asset_id is None and reg.asset_id:
+        device.asset_id=reg.asset_id;db.session.commit()
     if not reg.used_at or not device:return jsonify(state='WAITING',kind='HARDWARE' if is_hardware else 'MOBILE',expires_at=aware(reg.expires_at).isoformat())
     if is_hardware:
         return jsonify(state='CONNECTED',kind='HARDWARE',device_uid=device.device_uid,asset_name=reg.asset.name,profile_code=reg.profile_code or device.profile_code,firmware=device.firmware or 'Awaiting first telemetry',provisioning_state=reg.provisioning_state or 'CONNECTED',last_contact=device.last_seen.isoformat() if device.last_seen else None,open_studio=url_for('main.universal_device_panel',asset_id=reg.asset_id),open_asset=url_for('main.asset_view',asset_id=reg.asset_id),open_devices=url_for('main.devices'))
@@ -2987,6 +2964,7 @@ def ingest():
     payload=request.get_json(silent=True) or {}
     if payload.get('device_id') and payload['device_id']!=device.device_uid:return jsonify(error='device_id mismatch'),403
     sampled=parse_time(payload.get('timestamp'));sequence=str(payload.get('sequence','')).strip();stored=[];duplicates=[];asset=device.asset
+    if asset is None:return jsonify(error='asset_assignment_required',device_uid=device.device_uid,message='The claimed device must be linked to its onboarding asset before telemetry can be accepted.'),409
     incoming_keys={str(item.get('point','')).strip() for item in payload.get('measurements',[]) if str(item.get('point','')).strip()}
     apply_dashboard_selection=bool(payload.get('dashboard_selection'))
     managed_keys=set(BOARD_TELEMETRY_SPECS.get(device.device_type,{}))|set(PASSTHROUGH_SIGNAL_SPECS)

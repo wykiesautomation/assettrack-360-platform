@@ -58,8 +58,10 @@ def claim():
     uid='AT360-'+board; existing=Device.query.filter_by(device_uid=uid).first()
     if existing and existing.customer_id!=reg.customer_id:return jsonify(error='board_already_claimed'),409
     token=secrets.token_urlsafe(36)
-    dev=existing or Device(customer_id=reg.customer_id,asset_id=None,device_uid=uid,device_type=profile['device_type'],api_token=token,capabilities=[])
+    registration_asset_id=getattr(reg,'asset_id',None)
+    dev=existing or Device(customer_id=reg.customer_id,asset_id=registration_asset_id,device_uid=uid,device_type=profile['device_type'],api_token=token,capabilities=[])
     if not existing:db.session.add(dev)
+    elif dev.asset_id is None and registration_asset_id:dev.asset_id=registration_asset_id
     dev.active=True;dev.api_token=token;dev.firmware=str(d.get('firmware',''))[:40];dev.capabilities=list(dict.fromkeys(profile.get('capabilities',[])+['PROFILE:'+profile['code']]))
     db.session.flush()
     if hasattr(reg,'claimed_device_id'):reg.claimed_device_id=dev.id
