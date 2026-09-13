@@ -1,0 +1,13 @@
+AssetTrack 360 Direct Web Mobile Tracking Root Cause Fix
+
+Root cause:
+The QR browser registration sent platform=android and client_version=mobile-web-2.0. Registration therefore created device_type ANDROID_MOBILE_TRACKER. The mobile web API authentication helper accepted only MOBILE_WEB_TRACKER. Registration succeeded, but Start Tracking, heartbeat and location immediately returned 401. The JavaScript then erased local registration and jumped back to Register Phone.
+
+Fixes:
+- All supported mobile tracker device types authenticate on the shared mobile API.
+- mobile-web client versions are registered as MOBILE_WEB_TRACKER even on an Android phone browser.
+- Existing ANDROID_MOBILE_TRACKER and IOS_MOBILE_TRACKER records remain compatible.
+- 401/403 no longer erases registration state.
+- Heartbeat, tracking events and location uploads show exact server errors in Activity Log.
+- Direct web tracker client version advanced to mobile-web-2.1.
+- Explicit consent, Register Phone, and Start Tracking flow remains intact.
