@@ -1206,6 +1206,21 @@ def geofence_evaluation(points,zone):
         'reason':('Confirmed outside keep-in boundary' if rule=='KEEP_IN' else 'Confirmed inside keep-out boundary') if confirmed else 'No confirmed breach'}
 
 
+def trip_overspeed_episodes(speed_profile,speed_limit,tolerance=3.0):
+    """Count contiguous validated overspeed runs above limit plus tolerance."""
+    threshold=float(speed_limit or 0)+float(tolerance or 0)
+    episodes=[];current=None
+    for index,value in enumerate(list(speed_profile or [])):
+        speed=max(0.0,float(value or 0))
+        if threshold and speed>=threshold:
+            if current is None:current={'start_index':index,'end_index':index,'maximum_speed_kmh':speed}
+            else:
+                current['end_index']=index;current['maximum_speed_kmh']=max(current['maximum_speed_kmh'],speed)
+        elif current is not None:
+            episodes.append(current);current=None
+    if current is not None:episodes.append(current)
+    return episodes
+
 def build_validated_trips(rows,speed_limit=60.0):
     """Build Start/Stop trips while suppressing indoor stationary GPS drift.
 
@@ -1307,10 +1322,11 @@ def build_validated_trips(rows,speed_limit=60.0):
             'average_speed':round(total/(moving_seconds/3600),1) if moving_seconds else 0,
             'quality':quality,'point_count':len(chain),'rejected_count':len(rejected),'route':route,
             'speed_profile':[round(x['speed'],1) for x in accepted_edges] or [0.0],
-            'overspeed_episodes':[],'start':route[0],'end':route[-1],'stationary':not bool(accepted_edges)})
+            'overspeed_episodes':trip_overspeed_episodes([round(x['speed'],1) for x in accepted_edges],speed_limit),
+            'start':route[0],'end':route[-1],'stationary':not bool(accepted_edges)})
     return {'trips':trips,'total_distance_km':round(sum(x['distance_km'] for x in trips),3),
         'total_minutes':sum(x['duration_minutes'] for x in trips),
-        'maximum_speed':max([x['maximum_speed'] for x in trips] or [0]),'overspeed_count':0,
+        'maximum_speed':max([x['maximum_speed'] for x in trips] or [0]),'overspeed_count':sum(len(x.get('overspeed_episodes') or []) for x in trips),
         'rejected_count':len(rejected),'raw_count':len(raw)+len(rejected)}
 
 @bp.get('/asset/<int:asset_id>/trips')
@@ -1348,14 +1364,15 @@ def asset_trips(asset_id):
                 'moving_minutes':round(movement_seconds/60),'stopped_minutes':max(0,round((duration_seconds-movement_seconds)/60)),
                 'quality':int(item.get('route_quality') or history.get('confidence') or 0),
                 'route':route,'speed_profile':[round(float(point.get('speed') or 0),1) for point in route],
-                'overspeed_episodes':[],'stationary':False})
+                'overspeed_episodes':trip_overspeed_episodes([round(float(point.get('speed') or 0),1) for point in route],speed_limit),
+                'stationary':False})
         if adapted:
             trip_data={'trips':adapted,'total_distance_km':round(sum(x['distance_km'] for x in adapted),3),
                 'total_minutes':sum(x['duration_minutes'] for x in adapted),
-                'maximum_speed':max([x['maximum_speed'] for x in adapted] or [0]),'overspeed_count':0,
+                'maximum_speed':max([x['maximum_speed'] for x in adapted] or [0]),'overspeed_count':sum(len(x.get('overspeed_episodes') or []) for x in adapted),
                 'rejected_count':int(history.get('rejected_count') or 0),'raw_count':int(history.get('raw_count') or len(rows))}
     device_id=request.args.get('device_id',type=int);device=Device.query.filter_by(id=device_id,customer_id=tenant_id(),asset_id=asset.id).first() if device_id else active_device_for(asset)
-    return render_template('trips_command_centre.html',asset=asset,device=device,trip_data=trip_data,start=start,end=end,speed_limit=speed_limit)
+    return render_template('trips_command_centre.html',asset=asset,device=device,trip_data=trip_data,start=start,end=end,start_date=start.astimezone(sast).date().isoformat(),end_date=end.astimezone(sast).date().isoformat(),speed_limit=speed_limit)
 
 @bp.get('/asset/<int:asset_id>/tracking')
 @login_required
