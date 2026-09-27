@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const API={register:'/api/v1/mobile/register',location:'/api/v1/mobile/location',batch:'/api/v1/mobile/location/batch',heartbeat:'/api/v1/mobile/heartbeat',config:'/api/v1/mobile/config',start:'/api/v1/mobile/tracking/start',stop:'/api/v1/mobile/tracking/stop',event:'/api/v1/mobile/event',status:'/api/v1/mobile/status'};
-  const STORAGE_KEY='at360_mobile_tracker_v1',QUEUE_KEY='at360_mobile_queue_v2',TRACKING_KEY='at360_tracking_enabled_v2';
+  const STORAGE_KEY='at360_mobile_tracker_v1',QUEUE_KEY='at360_mobile_queue_v2',TRACKING_KEY='at360_tracking_enabled_v2',TRIP_KEY='at360_active_trip_v1';
   const HEARTBEAT_MS=60000,STALE_MS=150000,MAX_QUEUE=5000,WATCHDOG_MS=45000,RESTART_DELAY_MS=10000;
   let watchId=null,heartbeatId=null,healthId=null,watchdogId=null,restartId=null,wakeLock=null,lastPosition=null,lastFixAt=0,batteryLevel=null,charging=null,uploading=false,pausedByBrowser=false,retryDelay=2000,serverConfig={heartbeat_interval_seconds:60,max_batch_points:100,max_offline_queue:1000};
   const el=id=>document.getElementById(id);
@@ -19,7 +19,10 @@
   function showTracker(s){el('registerCard')?.classList.add('hidden');el('trackerCard')?.classList.remove('hidden');el('motionCard')?.classList.remove('hidden');if(el('deviceUid'))el('deviceUid').textContent=s.device_uid||'-';if(el('assetName'))el('assetName').textContent=s.asset_name||'Mobile Tracker';updateNetwork();updateQueue();refreshStatus();}
   function showRegistration(){el('trackerCard')?.classList.add('hidden');el('motionCard')?.classList.add('hidden');el('registerCard')?.classList.remove('hidden');}
   async function safeJson(r){const t=await r.text();try{return t?JSON.parse(t):{};}catch{return{error:t.slice(0,240)}}}
-  function nextSequence(){const s=loadState();if(!s)throw Error('Phone is not registered');s.sequence=(s.sequence||0)+1;saveState(s);return`${s.device_uid}-${Date.now()}-${s.sequence}`;}
+  function activeTrip(){return localStorage.getItem(TRIP_KEY)||'';}
+  function newTrip(){const id=`trip-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;localStorage.setItem(TRIP_KEY,id);return id;}
+  function closeTrip(){localStorage.removeItem(TRIP_KEY);}
+  function nextSequence(){const s=loadState();if(!s)throw Error('Phone is not registered');s.sequence=(s.sequence||0)+1;saveState(s);const trip=activeTrip()||newTrip();return`${trip}|${s.device_uid}-${Date.now()}-${s.sequence}`;}
   function updateQueue(){if(el('queueCount'))el('queueCount').textContent=String(loadQueue().length);}
   function updateNetwork(){if(el('network'))el('network').textContent=navigator.onLine?'Online':'Offline';}
   function lastSuccess(){return Number(loadState()?.last_success_at||0);}
@@ -67,8 +70,8 @@
     el('startBtn')?.classList.add('hidden');el('stopBtn')?.classList.remove('hidden');refreshStatus();
     if(!restored)sendEvent('TRACKING_STARTED');log(restored?'Tracking restored after page reload.':'Tracking started by phone user.');
   }
-  function startTracking(){if(!loadState()){showRegistration();log('Register this phone first.');return;}setTrackingWanted(true);beginWatch(false);}
-  function stopTracking(notify=true){setTrackingWanted(false);stopWatch();el('startBtn')?.classList.remove('hidden');el('stopBtn')?.classList.add('hidden');refreshStatus();if(notify)sendEvent('TRACKING_STOPPED');log('Tracking stopped.');}
+  function startTracking(){if(!loadState()){showRegistration();log('Register this phone first.');return;}newTrip();setTrackingWanted(true);beginWatch(false);log('New trip opened.');}
+  function stopTracking(notify=true){setTrackingWanted(false);stopWatch();closeTrip();el('startBtn')?.classList.remove('hidden');el('stopBtn')?.classList.add('hidden');refreshStatus();if(notify)sendEvent('TRACKING_STOPPED');log('Tracking stopped. Current trip closed.');}
   async function registerPhone(){const code=(el('code')?.value||'').trim().toUpperCase();if(!el('consentCheck')?.checked){log('Accept the privacy notice.');return;}if(code.length<8){log('Enter the full registration code.');return;}setRegisterBusy(true);try{const r=await fetch(API.register,{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({code,consent:true,policy_version:'2026.1',platform:platform(),client_version:'mobile-web-2.1'})});const d=await safeJson(r);if(!r.ok)throw Error(d.error||`HTTP ${r.status}`);const registered={device_uid:d.device_uid,token:d.device_token,asset_name:d.asset_name||'Mobile Tracker',sequence:0,last_success_at:0};saveState(registered);saveQueue([]);setTrackingWanted(false);showTracker(registered);await loadConfig();log(`Phone registered as ${d.device_uid}. Registration complete. Press Start Tracking when ready.`);}catch(e){log(`Registration failed: ${e.message}`);}finally{setRegisterBusy(false);}}
   async function withdrawConsent(){stopTracking(false);if(await sendEvent('CONSENT_WITHDRAWN')){localStorage.removeItem(STORAGE_KEY);localStorage.removeItem(QUEUE_KEY);showRegistration();}}
   async function unregisterPhone(){if(!confirm('Unregister this phone and revoke its token?'))return;stopTracking(false);await sendEvent('UNREGISTERED');localStorage.removeItem(STORAGE_KEY);localStorage.removeItem(QUEUE_KEY);showRegistration();}

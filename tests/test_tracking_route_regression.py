@@ -45,3 +45,40 @@ def test_stop_requires_prior_movement_and_two_minutes():
     result = analyse_tracking_points(rows)
     assert len(result['stops']) == 1
     assert result['stopped_minutes'] >= 2
+
+def test_normal_highway_distance_over_250m_is_accepted():
+    rows = [
+        point(0, -26.7000, 27.9000, 100, 10, BASE),
+        point(1, -26.6964, 27.9000, 100, 10, BASE + timedelta(seconds=15)),
+        point(2, -26.6928, 27.9000, 100, 10, BASE + timedelta(seconds=30)),
+    ]
+    result = analyse_tracking_points(rows)
+    assert result['rejection_counts'].get('IMPOSSIBLE_JUMP', 0) == 0
+    assert len(result['journeys']) == 1
+    assert result['distance_km'] > 0.7
+
+
+def test_five_minute_mobile_reporting_gap_keeps_one_journey():
+    rows = [
+        point(0, -26.7000, 27.9000, 70, 10, BASE),
+        point(1, -26.6990, 27.9000, 70, 10, BASE + timedelta(seconds=15)),
+        point(2, -26.6500, 27.9000, 70, 10, BASE + timedelta(minutes=5, seconds=15)),
+        point(3, -26.6490, 27.9000, 70, 10, BASE + timedelta(minutes=5, seconds=30)),
+    ]
+    result = analyse_tracking_points(rows)
+    assert len(result['journeys']) == 1
+    assert result['distance_km'] > 5
+
+
+def test_short_customer_stop_does_not_split_journey():
+    rows = [
+        point(0, -26.7000, 27.9000, 30, 8, BASE),
+        point(1, -26.6990, 27.9000, 30, 8, BASE + timedelta(seconds=30)),
+        point(2, -26.6990, 27.9000, 0, 8, BASE + timedelta(minutes=1)),
+        point(3, -26.6990, 27.9000, 0, 8, BASE + timedelta(minutes=6)),
+        point(4, -26.6980, 27.9000, 30, 8, BASE + timedelta(minutes=6, seconds=30)),
+        point(5, -26.6970, 27.9000, 30, 8, BASE + timedelta(minutes=7)),
+    ]
+    result = analyse_tracking_points(rows)
+    assert len(result['journeys']) == 1
+    assert result['stopped_minutes'] >= 5

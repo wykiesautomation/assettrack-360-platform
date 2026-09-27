@@ -987,7 +987,9 @@ def analyse_tracking_points(rows):
             reject_values(row,'INVALID_COORDINATES');continue
         if acc>100:
             reject_values(row,'POOR_ACCURACY');continue
-        valid.append({'latitude':lat,'longitude':lon,'accuracy':acc,'speed':speed,'timestamp':aware(row.sampled_at).isoformat()})
+        sequence=str(getattr(row,'sequence','') or '')
+        trip_id=sequence.split('|',1)[0] if sequence.startswith('trip-') and '|' in sequence else None
+        valid.append({'latitude':lat,'longitude':lon,'accuracy':acc,'speed':speed,'timestamp':aware(row.sampled_at).isoformat(),'trip_id':trip_id})
 
     segments=[];current=[];accepted=[];stops=[];moving_seconds=0.0;stationary_started=None;stationary_point=None;journey_has_moved=False
     for point in valid:
@@ -997,14 +999,16 @@ def analyse_tracking_points(rows):
         seconds=(datetime.fromisoformat(point['timestamp'])-datetime.fromisoformat(previous['timestamp'])).total_seconds()
         if seconds<=0:
             continue
-        if seconds>180:
+        # Keep one real journey intact across short mobile/browser reporting gaps.
+        if seconds>900:
             if len(current)>=2 and journey_has_moved:segments.append(current)
             current=[point];stationary_started=None;stationary_point=point;journey_has_moved=False;continue
         metres=_distance_dict(previous,point)*1000
         implied_kmh=(metres/seconds)*3.6
         reported=max(float(previous.get('speed') or 0),float(point.get('speed') or 0))
-        plausible_ceiling=max(35.0,reported*3.0+25.0)
-        if metres>250 or implied_kmh>min(180.0,plausible_ceiling):
+        # Validate by elapsed time and implied speed, never a fixed distance.
+        plausible_ceiling=180.0 if reported<3.0 else min(180.0,max(90.0,reported*1.8+35.0))
+        if implied_kmh>plausible_ceiling:
             rejection_counts['IMPOSSIBLE_JUMP']=rejection_counts.get('IMPOSSIBLE_JUMP',0)+1
             rejected.append(dict(point,reason='IMPOSSIBLE_JUMP'))
             if len(current)>=2 and journey_has_moved:segments.append(current)
@@ -1055,10 +1059,10 @@ def analyse_tracking_points(rows):
         total_km=0.0;moving_seconds=0.0;interval_speeds=[];reported=[]
         for a,b in zip(points,points[1:]):
             seconds=(datetime.fromisoformat(b['timestamp'])-datetime.fromisoformat(a['timestamp'])).total_seconds()
-            if seconds<=0 or seconds>180:continue
+            if seconds<=0 or seconds>900:continue
             km=_distance_dict(a,b);implied=km/(seconds/3600.0)
             jitter=max(6.0,min(25.0,(float(a.get('accuracy') or 0)+float(b.get('accuracy') or 0))*0.35))
-            if km*1000<=jitter or km*1000>2500 or implied>140:continue
+            if km*1000<=jitter or implied>180:continue
             total_km+=km;moving_seconds+=seconds;interval_speeds.append(implied)
             reported.extend([float(a.get('speed') or 0),float(b.get('speed') or 0)])
         if total_km<0.10 or moving_seconds<20:return
@@ -1076,14 +1080,16 @@ def analyse_tracking_points(rows):
     for point in valid:
         if not trip:trip=[point];stationary_started=None;continue
         previous=trip[-1];a=datetime.fromisoformat(previous['timestamp']);b=datetime.fromisoformat(point['timestamp']);seconds=(b-a).total_seconds();metres=_distance_dict(previous,point)*1000;implied=(metres/seconds)*3.6 if seconds>0 else 9999
-        new_day=a.date()!=b.date();gap=seconds<=0 or seconds>180;impossible=metres>2500 or implied>140
+        explicit_trip_change=bool(previous.get('trip_id') and point.get('trip_id') and previous.get('trip_id')!=point.get('trip_id'))
+        new_day=a.date()!=b.date();gap=seconds<=0 or seconds>900;impossible=implied>180
         jitter=max(6.0,min(25.0,(float(previous.get('accuracy') or 0)+float(point.get('accuracy') or 0))*0.35))
         stationary=metres<=jitter and max(float(previous.get('speed') or 0),float(point.get('speed') or 0))<3
-        if new_day or gap or impossible:
+        if explicit_trip_change or new_day or gap or impossible:
             finish_trip(trip);trip=[point];stationary_started=None;continue
         if stationary:
             if stationary_started is None:stationary_started=a
-            if (b-stationary_started).total_seconds()>=120:
+            # Keep ordinary traffic/customer stops inside the same journey.
+            if (b-stationary_started).total_seconds()>=1200:
                 finish_trip(trip);trip=[point];stationary_started=None
             else:trip.append(point)
             continue
