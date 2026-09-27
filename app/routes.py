@@ -1155,6 +1155,57 @@ def fleet_tracking():
     return redirect(url_for('main.safety_twin',asset_id=selected['asset'].id,device_id=selected['device'].id))
 
 
+SPEEDING_TOLERANCE_KMH = 3.0
+GEOFENCE_MIN_CONFIRMATIONS = 2
+GEOFENCE_ACCURACY_CAP_M = 60.0
+
+
+def tracking_speed_limit(safety):
+    """Return one canonical configured limit without the old hard 60 km/h cap."""
+    try:
+        value=float((safety or {}).get('speed_limit_kmh',60.0))
+    except (TypeError,ValueError):
+        value=60.0
+    return max(20.0,min(160.0,value))
+
+
+def speeding_event(speed,limit,point,tolerance=SPEEDING_TOLERANCE_KMH):
+    speed=float(speed or 0);limit=float(limit or 0);over=speed-limit
+    if not limit or over < float(tolerance):return None
+    return {'type':'SPEEDING','severity':'HIGH',
+        'message':f"Speed limit exceeded: {speed:.1f} km/h; recorded limit {limit:.1f} km/h; over by {over:.1f} km/h",
+        'timestamp':point['timestamp'],'latitude':point['latitude'],'longitude':point['longitude'],
+        'maximum_speed_kmh':round(speed,1),'recorded_speed_limit_kmh':round(limit,1),
+        'over_limit_kmh':round(over,1),'speed_limit_source':'Asset safety rule',
+        'speeding_tolerance_kmh':round(float(tolerance),1)}
+
+
+def geofence_evaluation(points,zone):
+    center={'latitude':float(zone['latitude']),'longitude':float(zone['longitude'])}
+    radius=max(25.0,float(zone.get('radius_m',250)))
+    rule='KEEP_OUT' if zone.get('rule')=='KEEP_OUT' else 'KEEP_IN'
+    evidence=[]
+    for point in list(points or [])[-4:]:
+        accuracy=max(3.0,min(GEOFENCE_ACCURACY_CAP_M,float(point.get('accuracy') or 20)))
+        distance=_distance_dict(point,center)*1000
+        inside=distance <= max(0.0,radius-accuracy) if rule=='KEEP_IN' else distance <= radius+accuracy
+        breach=(rule=='KEEP_IN' and not inside) or (rule=='KEEP_OUT' and inside)
+        evidence.append({'point':point,'distance_m':distance,'accuracy_m':accuracy,'inside':inside,'breach':breach})
+    consecutive=0
+    for item in reversed(evidence):
+        if item['breach']:consecutive+=1
+        else:break
+    latest=evidence[-1] if evidence else None
+    confirmed=bool(latest and consecutive>=GEOFENCE_MIN_CONFIRMATIONS)
+    return {'name':str(zone.get('name') or 'Safety Zone'),'rule':rule,
+        'inside':bool(latest and latest['inside']),'breach':confirmed,
+        'candidate_breach':bool(latest and latest['breach']),'confirmations':consecutive,
+        'required_confirmations':GEOFENCE_MIN_CONFIRMATIONS,
+        'distance_m':round(latest['distance_m']) if latest else None,'radius_m':round(radius),
+        'accuracy_m':round(latest['accuracy_m']) if latest else None,
+        'reason':('Confirmed outside keep-in boundary' if rule=='KEEP_IN' else 'Confirmed inside keep-out boundary') if confirmed else 'No confirmed breach'}
+
+
 def build_validated_trips(rows,speed_limit=60.0):
     """Build Start/Stop trips while suppressing indoor stationary GPS drift.
 
@@ -1272,8 +1323,38 @@ def asset_trips(asset_id):
     except ValueError:end=now
     if start>end:start,end=end,start
     rows=Location.query.filter(Location.customer_id==tenant_id(),Location.asset_id==asset.id,Location.sampled_at>=start,Location.sampled_at<=end).order_by(Location.sampled_at).limit(20000).all()
-    safety=(asset.metadata_json or {}).get('tracking_safety',{}) or {};speed_limit=min(60.0,float(safety.get('speed_limit_kmh') if safety.get('speed_limit_kmh') is not None else 60))
-    trip_data=build_validated_trips(rows,speed_limit);device_id=request.args.get('device_id',type=int);device=Device.query.filter_by(id=device_id,customer_id=tenant_id(),asset_id=asset.id).first() if device_id else active_device_for(asset)
+    safety=(asset.metadata_json or {}).get('tracking_safety',{}) or {};speed_limit=tracking_speed_limit(safety)
+    trip_data=build_validated_trips(rows,speed_limit)
+    # Compatibility fallback: Tracking History already validates older/legacy GPS
+    # journeys that may not carry modern explicit Start/Stop sequence identities.
+    # If Trips reconstructs none, reuse those same proven journeys and adapt only
+    # their presentation fields. This does not change GPS evidence or calculations.
+    if not trip_data.get('trips') and rows:
+        history=analyse_tracking_points(rows)
+        history_trips=history.get('trips') or []
+        adapted=[]
+        for index,item in enumerate(history_trips,1):
+            route=list(item.get('points') or [])
+            if len(route)<2:continue
+            duration_seconds=max(0,int(item.get('duration_seconds') or 0))
+            movement_seconds=max(0,int(item.get('movement_seconds') or 0))
+            distance_km=max(0.0,float(item.get('distance_km') or 0))
+            maximum_speed=max(0.0,float(item.get('maximum_speed') or 0))
+            adapted.append({'number':index,'trip_id':item.get('trip_id'),'started_at':item.get('started_at'),'ended_at':item.get('ended_at'),
+                'start':route[0],'end':route[-1],'point_count':int(item.get('point_count') or len(route)),
+                'distance_km':round(distance_km,3),'maximum_speed':round(maximum_speed,1),
+                'average_speed':round(distance_km/(movement_seconds/3600),1) if movement_seconds else 0,
+                'duration_seconds':duration_seconds,'duration_minutes':round(duration_seconds/60),
+                'moving_minutes':round(movement_seconds/60),'stopped_minutes':max(0,round((duration_seconds-movement_seconds)/60)),
+                'quality':int(item.get('route_quality') or history.get('confidence') or 0),
+                'route':route,'speed_profile':[round(float(point.get('speed') or 0),1) for point in route],
+                'overspeed_episodes':[],'stationary':False})
+        if adapted:
+            trip_data={'trips':adapted,'total_distance_km':round(sum(x['distance_km'] for x in adapted),3),
+                'total_minutes':sum(x['duration_minutes'] for x in adapted),
+                'maximum_speed':max([x['maximum_speed'] for x in adapted] or [0]),'overspeed_count':0,
+                'rejected_count':int(history.get('rejected_count') or 0),'raw_count':int(history.get('raw_count') or len(rows))}
+    device_id=request.args.get('device_id',type=int);device=Device.query.filter_by(id=device_id,customer_id=tenant_id(),asset_id=asset.id).first() if device_id else active_device_for(asset)
     return render_template('trips_command_centre.html',asset=asset,device=device,trip_data=trip_data,start=start,end=end,speed_limit=speed_limit)
 
 @bp.get('/asset/<int:asset_id>/tracking')
@@ -1300,7 +1381,7 @@ def tracking_history(asset_id):
     last_known=Location.query.filter_by(customer_id=tenant_id(),asset_id=asset.id).order_by(desc(Location.sampled_at)).first()
     safety=(asset.metadata_json or {}).get('tracking_safety',{}) or {}
     zones=safety.get('zones',[]) if isinstance(safety.get('zones',[]),list) else []
-    speed_limit=min(60.0,float(safety.get('speed_limit_kmh') if safety.get('speed_limit_kmh') is not None else 60))
+    speed_limit=tracking_speed_limit(safety)
     defaults={'impact_crash':False,'rollover':False,'harsh_driving':True,'unauthorized_movement':False,'power_tamper':False}
     saved_rules=safety.get('rules',{}) if isinstance(safety.get('rules',{}),dict) else {}
     rules={key:bool(saved_rules.get(key,default)) for key,default in defaults.items()}
@@ -1309,12 +1390,12 @@ def tracking_history(asset_id):
     overspeed_episode=None
     for point in analysis.get('points',[]):
         speed=float(point.get('speed') or 0)
-        if speed_limit and speed>speed_limit:
+        candidate=speeding_event(speed,speed_limit,point)
+        if candidate:
             if overspeed_episode is None:
-                overspeed_episode={'type':'SPEEDING','severity':'HIGH','message':f"Speed limit exceeded: {round(speed)} km/h (limit {round(speed_limit)} km/h)",'timestamp':point['timestamp'],'latitude':point['latitude'],'longitude':point['longitude'],'maximum_speed_kmh':speed}
-                events.append(overspeed_episode)
+                overspeed_episode=candidate;events.append(overspeed_episode)
             elif speed>float(overspeed_episode.get('maximum_speed_kmh') or 0):
-                overspeed_episode['maximum_speed_kmh']=speed;overspeed_episode['message']=f"Speed limit exceeded: {round(speed)} km/h (limit {round(speed_limit)} km/h)"
+                overspeed_episode.update(candidate)
         else:
             overspeed_episode=None
     current_point=evaluation_points[-1] if evaluation_points else None
