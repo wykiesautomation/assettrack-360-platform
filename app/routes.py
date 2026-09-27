@@ -1156,76 +1156,111 @@ def fleet_tracking():
 
 
 def build_validated_trips(rows,speed_limit=60.0):
-    """Reconstruct customer-facing trips from measured GPS without road snapping.
+    """Build Start/Stop trips while suppressing indoor stationary GPS drift.
 
-    A trip is a continuous chain of good fixes. Gaps over 180 seconds, accuracy over
-    50 m, impossible speed, coordinate jumps and stationary uncertainty break or
-    exclude evidence. Metrics and map routes are generated from this single dataset.
+    Explicit ``trip-...|...`` sequence identities are authoritative boundaries.
+    A stationary cluster may remain open for hours without becoming movement.
+    Distance and maximum speed use only sustained, accuracy-cleared displacement.
     """
     raw=[];rejected=[]
     for row in sorted(rows,key=lambda x:(aware(x.sampled_at),getattr(x,'id',0) or 0)):
         try:
-            sequence=str(getattr(row,'sequence','') or '');trip_id=sequence.split('|',1)[0] if sequence.startswith('trip-') and '|' in sequence else None;point={'latitude':float(row.latitude),'longitude':float(row.longitude),'accuracy':max(3.0,float(row.accuracy_m or 0)),'reported_speed':max(0.0,float(row.speed_kmh or 0)),'timestamp':aware(row.sampled_at).isoformat(),'trip_id':trip_id}
+            sequence=str(getattr(row,'sequence','') or '')
+            trip_id=sequence.split('|',1)[0] if sequence.startswith('trip-') and '|' in sequence else None
+            point={'latitude':float(row.latitude),'longitude':float(row.longitude),'accuracy':max(3.0,float(row.accuracy_m or 0)),'reported_speed':max(0.0,float(row.speed_kmh or 0)),'timestamp':aware(row.sampled_at).isoformat(),'trip_id':trip_id}
         except (TypeError,ValueError):
             rejected.append({'reason':'INVALID_PAYLOAD'});continue
-        if not(-90<=point['latitude']<=90 and -180<=point['longitude']<=180) or (abs(point['latitude'])<.000001 and abs(point['longitude'])<.000001):rejected.append({'reason':'INVALID_COORDINATES'});continue
-        if point['accuracy']>50:rejected.append({'reason':'POOR_ACCURACY'});continue
+        if not(-90<=point['latitude']<=90 and -180<=point['longitude']<=180) or (abs(point['latitude'])<.000001 and abs(point['longitude'])<.000001):
+            rejected.append({'reason':'INVALID_COORDINATES'});continue
+        if point['accuracy']>100:
+            rejected.append({'reason':'POOR_ACCURACY'});continue
         raw.append(point)
+
+    # Group explicit phone trips by Start/Stop identity. Legacy rows retain a
+    # conservative time-gap boundary because no manual trip identity exists.
     chains=[];current=[]
     for point in raw:
-        if not current:current=[point];continue
-        previous=current[-1];seconds=(datetime.fromisoformat(point['timestamp'])-datetime.fromisoformat(previous['timestamp'])).total_seconds();km=_distance_dict(previous,point);implied=km/(seconds/3600) if seconds>0 else 9999
-        uncertainty=max(8.0,min(40.0,(previous['accuracy']+point['accuracy'])*.55))
-        moving=(km*1000)>uncertainty or max(previous['reported_speed'],point['reported_speed'])>=8
-        explicit_same=bool(previous.get('trip_id') and previous.get('trip_id')==point.get('trip_id'))
-        explicit_changed=bool((previous.get('trip_id') or point.get('trip_id')) and previous.get('trip_id')!=point.get('trip_id'))
-        continuous=0<seconds<=180 and km<=3 and implied<=130
-        if explicit_changed:
-            if len(current)>=2:chains.append(current)
+        if not current:
+            current=[point];continue
+        previous=current[-1]
+        seconds=(datetime.fromisoformat(point['timestamp'])-datetime.fromisoformat(previous['timestamp'])).total_seconds()
+        changed=bool((previous.get('trip_id') or point.get('trip_id')) and previous.get('trip_id')!=point.get('trip_id'))
+        legacy_gap=not previous.get('trip_id') and not point.get('trip_id') and seconds>900
+        if changed or legacy_gap:
+            if current:chains.append(current)
             current=[point]
-        elif explicit_same and seconds>0:
+        elif seconds>0:
             current.append(point)
-        elif continuous and moving:current.append(point)
-        elif continuous and not moving:
-            if len(current)>=2:chains.append(current)
-            current=[]
-        else:
-            rejected.append({'reason':'GAP_OR_JUMP','timestamp':point['timestamp']})
-            if len(current)>=2:chains.append(current)
-            current=[point]
-    if len(current)>=2:chains.append(current)
+    if current:chains.append(current)
+
     trips=[]
     for chain in chains:
-        distances=[];speeds=[];seconds_total=0.0
-        for a,b in zip(chain,chain[1:]):
-            dt=(datetime.fromisoformat(b['timestamp'])-datetime.fromisoformat(a['timestamp'])).total_seconds();km=_distance_dict(a,b);derived=km/(dt/3600) if dt>0 else 0
-            if not(0<dt<=180 and derived<=130):continue
-            if km*1000<=max(8.0,min(40.0,(a['accuracy']+b['accuracy'])*.55)):continue
-            distances.append(km);seconds_total+=dt
-            reported=max(float(a['reported_speed']),float(b['reported_speed']))
-            # Reported phone speed is accepted only when it agrees with measured displacement.
-            candidate=reported if abs(reported-derived)<=25 else derived
-            speeds.append(min(130.0,max(0.0,candidate)))
-        total=sum(distances)
-        if total<0.3 or seconds_total<60:continue
-        # A trip maximum needs point-neighbourhood support; one isolated phone spike is ignored.
-        reported_profile=[min(130.0,max(0.0,float(x['reported_speed'] or 0))) for x in chain]
-        confirmed=[]
-        for i,value in enumerate(reported_profile):
-            neighbours=reported_profile[max(0,i-1):min(len(reported_profile),i+2)]
-            if value>0 and len(neighbours)>=2 and sum(1 for x in neighbours if x>=value*.65)>=2:confirmed.append(value)
-        maximum=max(confirmed or speeds or [0])
-        overspeed=[];episode=None
-        for point in chain:
-            speed=float(point['reported_speed'] or 0)
-            if speed>speed_limit:
-                if episode is None:episode={'started_at':point['timestamp'],'ended_at':point['timestamp'],'maximum_speed':speed,'point_count':1}
-                else:episode['ended_at']=point['timestamp'];episode['maximum_speed']=max(episode['maximum_speed'],speed);episode['point_count']+=1
-            elif episode is not None:overspeed.append(episode);episode=None
-        if episode is not None:overspeed.append(episode)
+        if not chain:continue
+        started=datetime.fromisoformat(chain[0]['timestamp']);ended=datetime.fromisoformat(chain[-1]['timestamp'])
+        duration=max(0.0,(ended-started).total_seconds())
+        accuracies=sorted(float(x['accuracy']) for x in chain)
+        p90=accuracies[min(len(accuracies)-1,max(0,int(len(accuracies)*.9)-1))]
+        cluster_radius=max(35.0,min(100.0,p90*2.5))
+        centre={'latitude':sorted(x['latitude'] for x in chain)[len(chain)//2],
+                'longitude':sorted(x['longitude'] for x in chain)[len(chain)//2]}
+        max_radius=max([_distance_dict(centre,x)*1000 for x in chain] or [0.0])
+
+        # Entire trip stayed in one small place. Preserve the open trip and its
+        # elapsed/stopped time, but expose no route, distance or speed movement.
+        if max_radius<=cluster_radius:
+            anchor=dict(chain[0]);anchor['reported_speed']=0.0
+            trips.append({'number':len(trips)+1,'started_at':chain[0]['timestamp'],'ended_at':chain[-1]['timestamp'],
+                'duration_seconds':round(duration),'duration_minutes':round(duration/60),'moving_minutes':0,
+                'stopped_minutes':round(duration/60),'trip_id':chain[0].get('trip_id'),'distance_km':0.0,
+                'maximum_speed':0,'average_speed':0,'quality':100,'point_count':len(chain),
+                'rejected_count':len(rejected),'route':[anchor],'speed_profile':[0.0],
+                'overspeed_episodes':[],'start':anchor,'end':anchor,'stationary':True})
+            continue
+
+        # Candidate movement edges must clear the combined accuracy envelope,
+        # cover at least 25 m and produce a plausible measured speed.
+        edges=[]
+        for i,(a,b) in enumerate(zip(chain,chain[1:])):
+            dt=(datetime.fromisoformat(b['timestamp'])-datetime.fromisoformat(a['timestamp'])).total_seconds()
+            km=_distance_dict(a,b);metres=km*1000;derived=km/(dt/3600) if dt>0 else 9999
+            threshold=max(25.0,min(120.0,(a['accuracy']+b['accuracy'])*1.25))
+            candidate=0<dt<=900 and metres>threshold and 1.0<=derived<=160.0
+            edges.append({'i':i,'candidate':candidate,'km':km,'speed':derived,'seconds':dt})
+
+        # One isolated edge can be multipath drift. Movement requires an adjacent
+        # candidate edge, or a decisive 60 m displacement beyond the uncertainty.
+        accepted_edges=[]
+        for i,edge in enumerate(edges):
+            if not edge['candidate']:continue
+            adjacent=(i>0 and edges[i-1]['candidate']) or (i+1<len(edges) and edges[i+1]['candidate'])
+            decisive=edge['km']*1000>=max(60.0,(chain[i]['accuracy']+chain[i+1]['accuracy'])*2.0)
+            if adjacent or decisive:accepted_edges.append(edge)
+            else:rejected.append({'reason':'UNCONFIRMED_GPS_DRIFT','timestamp':chain[i+1]['timestamp']})
+
+        total=sum(x['km'] for x in accepted_edges)
+        moving_seconds=sum(x['seconds'] for x in accepted_edges)
+        explicit=bool(chain[0].get('trip_id'))
+        if not explicit and (total<0.10 or moving_seconds<20):continue
+
+        route_indices={0}
+        for edge in accepted_edges:route_indices.update((edge['i'],edge['i']+1))
+        route=[chain[i] for i in sorted(route_indices)] if accepted_edges else [chain[0]]
+        validated_speeds=[x['speed'] for x in accepted_edges]
+        maximum=max(validated_speeds or [0.0])
+        stopped_seconds=max(0.0,duration-moving_seconds)
         quality=max(0,min(100,round(100-(len(rejected)/max(1,len(raw)+len(rejected))*100))))
-        trips.append({'number':len(trips)+1,'started_at':chain[0]['timestamp'],'ended_at':chain[-1]['timestamp'],'duration_seconds':round(seconds_total),'duration_minutes':round(seconds_total/60),'distance_km':round(total,2),'maximum_speed':round(maximum),'average_speed':round(total/(seconds_total/3600),1) if seconds_total else 0,'quality':quality,'point_count':len(chain),'rejected_count':len(rejected),'route':chain,'speed_profile':[round(x,1) for x in reported_profile],'overspeed_episodes':overspeed,'start':chain[0],'end':chain[-1]})
-    return {'trips':trips,'total_distance_km':round(sum(x['distance_km'] for x in trips),2),'total_minutes':sum(x['duration_minutes'] for x in trips),'maximum_speed':max([x['maximum_speed'] for x in trips] or [0]),'overspeed_count':sum(len(x['overspeed_episodes']) for x in trips),'rejected_count':len(rejected),'raw_count':len(raw)+len(rejected)}
+        trips.append({'number':len(trips)+1,'started_at':chain[0]['timestamp'],'ended_at':chain[-1]['timestamp'],
+            'duration_seconds':round(duration),'duration_minutes':round(duration/60),
+            'moving_minutes':round(moving_seconds/60),'stopped_minutes':round(stopped_seconds/60),
+            'trip_id':chain[0].get('trip_id'),'distance_km':round(total,3),'maximum_speed':round(maximum),
+            'average_speed':round(total/(moving_seconds/3600),1) if moving_seconds else 0,
+            'quality':quality,'point_count':len(chain),'rejected_count':len(rejected),'route':route,
+            'speed_profile':[round(x['speed'],1) for x in accepted_edges] or [0.0],
+            'overspeed_episodes':[],'start':route[0],'end':route[-1],'stationary':not bool(accepted_edges)})
+    return {'trips':trips,'total_distance_km':round(sum(x['distance_km'] for x in trips),3),
+        'total_minutes':sum(x['duration_minutes'] for x in trips),
+        'maximum_speed':max([x['maximum_speed'] for x in trips] or [0]),'overspeed_count':0,
+        'rejected_count':len(rejected),'raw_count':len(raw)+len(rejected)}
 
 @bp.get('/asset/<int:asset_id>/trips')
 @login_required
