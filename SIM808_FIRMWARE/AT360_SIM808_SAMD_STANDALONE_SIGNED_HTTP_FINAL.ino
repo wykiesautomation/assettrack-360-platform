@@ -1,0 +1,868 @@
+/*
+  AssetTrack 360 - Maduino Zero SIM808 V3.5 Merged Bench + GSM Firmware
+  Final upload-ready baseline for SIM808 SAMD21 profile
+  MCU: ATSAMD21G18A
+  Board target: Arduino Zero (Native USB Port)
+
+  Confirmed bench map:
+    AI1 = A0
+    AI2 = A1
+    DO1 = D5
+    DO2 = D6
+    D9  = SIM808 POWER_KEY control
+
+  PC console: Serial @ 115200
+  SIM808 modem: Serial1 @ 115200
+
+  Copyright: (c) 2026 JP Van Wyk. All rights reserved.
+*/
+#include <Arduino.h>
+#include <FlashStorage.h>
+#include "TinySHA256.h"
+
+#define CONSOLE SerialUSB
+#define MODEM Serial1
+static const uint32_t CONSOLE_BAUD = 115200;
+static const uint32_t MODEM_BAUD = 115200;
+static const uint8_t PIN_AI1 = A0;
+static const uint8_t PIN_AI2 = A1;
+static const uint8_t PIN_DO1 = 5;
+static const uint8_t PIN_DO2 = 6;
+static const uint8_t PIN_SIM808_POWER = 9;
+static const uint32_t DEFAULT_PULSE_MS = 1000UL;
+static const char FW[] = "AT360-MADUINO-SIM808-V35-14.0-SIGNED-HTTP-AUTOCONNECT";
+
+struct Config {
+  uint32_t marker;
+  char apn[48];
+  char apnUser[32];
+  char apnPass[32];
+  char simPin[12];
+  char apiHost[96];
+  char apiPath[64];
+  char deviceUid[96];
+  char deviceToken[128];
+  char balanceUssd[24];
+  char dataUssd[24];
+  uint32_t uploadSeconds;
+  uint8_t autoUploadEnabled;
+  uint8_t reserved[3];
+};
+FlashStorage(configStore, Config);
+Config cfg;
+static const uint32_t LEGACY_CFG_MARKER = 0xA7360810;
+static const uint32_t PREVIOUS_CFG_MARKER = 0xA7360830;
+static const uint32_t CFG_MARKER = 0xA7360840;
+
+bool simulationMode = false;
+bool do1State = false, do2State = false;
+bool simDo1 = false, simDo2 = false;
+bool do1PulseMode = false, do2PulseMode = false;
+uint32_t do1PulseMs = DEFAULT_PULSE_MS, do2PulseMs = DEFAULT_PULSE_MS;
+float simAi1Percent = 0.0f, simAi2Percent = 0.0f;
+uint32_t do1Started = 0, do2Started = 0;
+uint32_t simDo1Started = 0, simDo2Started = 0;
+uint32_t lastStatus = 0, lastUploadMs = 0;
+static const uint32_t AUTO_UPLOAD_START_DELAY_MS = 30000UL;
+static const uint32_t UPLOAD_RETRY_MS = 30000UL;
+static const uint32_t SAFE_BOOT_MODEM_DELAY_MS = 15000UL;
+bool autoUpload = false;
+uint32_t lastUploadAttemptMs = 0;
+uint32_t bootStartedMs = 0;
+bool safeBootModemChecked = false;
+bool coldBootPowerPulseUsed = false;
+bool coldBootSequenceComplete = false;
+float lastAirtimeZar = -1.0f, lastDataMb = -1.0f;
+uint32_t lastBalanceCheckMs = 0;
+static const uint32_t BALANCE_CHECK_MS = 6UL * 60UL * 60UL * 1000UL;
+String lastBalanceRaw;
+String consoleLine;
+bool gnssPowered = false;
+uint32_t modemReadySinceMs = 0;
+uint32_t lastGnssPollMs = 0;
+static const uint32_t GNSS_POLL_MS = 10000UL;
+static const float GPS_STATIONARY_KMH = 5.0f;
+static const float GPS_MAX_HDOP = 2.5f;
+static const uint8_t GPS_MIN_SATELLITES_USED = 5;
+static const uint8_t GPS_STABLE_SAMPLE_COUNT = 5;
+// Calibrated for this installed SIM808 battery path.
+static const float BATTERY_EMPTY_VOLTS = 3.30f;
+static const float BATTERY_FULL_VOLTS = 3.84f;
+float stableLatSamples[GPS_STABLE_SAMPLE_COUNT] = {0};
+float stableLonSamples[GPS_STABLE_SAMPLE_COUNT] = {0};
+uint8_t stableSampleIndex = 0;
+uint8_t stableSampleTotal = 0;
+bool ensureModemReady();
+bool ensureGnssPower(bool publish = true);
+
+void emit(const String &key, const String &value) {
+  CONSOLE.println(key + "|" + value);
+}
+void safeCopy(char *dest, size_t size, const String &value) {
+  memset(dest, 0, size);
+  value.substring(0, size - 1).toCharArray(dest, size);
+}
+String configured(const char *value) {
+  return strlen(value) ? "CONFIGURED" : "NOT_SET";
+}
+void defaultConfig() {
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.marker = CFG_MARKER;
+  safeCopy(cfg.apiHost, sizeof(cfg.apiHost), "sim808-ingest.wykiesautomation.co.za");
+  safeCopy(cfg.apiPath, sizeof(cfg.apiPath), "/api/v1/sim808-legacy-ingest");
+  safeCopy(cfg.balanceUssd, sizeof(cfg.balanceUssd), "*136#");
+  safeCopy(cfg.dataUssd, sizeof(cfg.dataUssd), "*136#");
+  cfg.uploadSeconds = 60;
+  cfg.autoUploadEnabled = 0;
+  memset(cfg.reserved, 0, sizeof(cfg.reserved));
+}
+bool storedTextValid(const char *value, size_t size) {
+  for (size_t i = 0; i < size; i++) {
+    uint8_t c = uint8_t(value[i]);
+    if (c == 0) return true;
+    if (c < 32 || c > 126) return false;
+  }
+  return false;
+}
+void loadConfig() {
+  cfg = configStore.read();
+  if (cfg.marker == LEGACY_CFG_MARKER) {
+    cfg.marker = CFG_MARKER;
+    cfg.autoUploadEnabled = (strlen(cfg.apn) && strlen(cfg.deviceUid) && strlen(cfg.deviceToken)) ? 1 : 0;
+    safeCopy(cfg.apiHost, sizeof(cfg.apiHost), "sim808-ingest.wykiesautomation.co.za");
+    safeCopy(cfg.apiPath, sizeof(cfg.apiPath), "/api/v1/sim808-legacy-ingest");
+    memset(cfg.reserved, 0, sizeof(cfg.reserved));
+    configStore.write(cfg);
+  } else if (cfg.marker == PREVIOUS_CFG_MARKER) {
+    // Preserve APN, UID, token and AUTO_ON from REV13 while migrating transport.
+    cfg.marker = CFG_MARKER;
+    safeCopy(cfg.apiHost, sizeof(cfg.apiHost), "sim808-ingest.wykiesautomation.co.za");
+    safeCopy(cfg.apiPath, sizeof(cfg.apiPath), "/api/v1/sim808-legacy-ingest");
+    configStore.write(cfg);
+  } else if (cfg.marker != CFG_MARKER) {
+    defaultConfig();
+    configStore.write(cfg);
+  }
+  if (!storedTextValid(cfg.apn, sizeof(cfg.apn)) ||
+      !storedTextValid(cfg.deviceUid, sizeof(cfg.deviceUid)) ||
+      !storedTextValid(cfg.deviceToken, sizeof(cfg.deviceToken))) {
+    defaultConfig();
+    configStore.write(cfg);
+  }
+  if (cfg.uploadSeconds < 30 || cfg.uploadSeconds > 86400) cfg.uploadSeconds = 60;
+  cfg.autoUploadEnabled = cfg.autoUploadEnabled ? 1 : 0;
+}
+
+float rawToVolts(int raw) {
+  return raw * 3.3f / 4095.0f;
+}
+float rawToPercent(int raw) {
+  return constrain(raw * 100.0f / 4095.0f, 0.0f, 100.0f);
+}
+int percentToRaw(float value) {
+  return int(constrain(value, 0.0f, 100.0f) * 4095.0f / 100.0f + 0.5f);
+}
+void forceOutputsOff() {
+  digitalWrite(PIN_DO1, LOW);
+  digitalWrite(PIN_DO2, LOW);
+  do1State = false;
+  do2State = false;
+}
+void setOutput(uint8_t pin, bool &state, uint32_t &started, bool on) {
+  if (simulationMode) {
+    digitalWrite(pin, LOW);
+    state = false;
+    return;
+  }
+  digitalWrite(pin, on ? HIGH : LOW);
+  state = on;
+  if (on) started = millis();
+}
+
+String modemCommand(const String &command, uint32_t timeoutMs = 3000, bool publish = true) {
+  while (MODEM.available()) MODEM.read();
+  MODEM.println(command);
+  String response;
+  uint32_t started = millis();
+  while (millis() - started < timeoutMs) {
+    while (MODEM.available()) response += char(MODEM.read());
+    if (response.indexOf("OK") >= 0 || response.indexOf("ERROR") >= 0 || response.indexOf("DOWNLOAD") >= 0) break;
+    delay(2);
+  }
+  response.trim();
+  if (publish) emit("AT_RESPONSE", response.length() ? response : "TIMEOUT");
+  return response;
+}
+bool hasOK(const String &response) {
+  return response.indexOf("OK") >= 0;
+}
+
+String responseLine(const String &response, const String &prefix) {
+  int start = response.indexOf(prefix);
+  if (start < 0) return "";
+  int end = response.indexOf('\n', start);
+  String line = end < 0 ? response.substring(start) : response.substring(start, end);
+  line.replace("\r", "");
+  line.trim();
+  return line;
+}
+
+String csvField(const String &line, int index) {
+  int field = 0, start = 0;
+  for (int i = 0; i <= line.length(); i++) {
+    if (i == line.length() || line.charAt(i) == ',') {
+      if (field == index) return line.substring(start, i);
+      field++; start = i + 1;
+    }
+  }
+  return "";
+}
+
+struct LiveTelemetry {
+  bool gpsRunning = false;
+  bool gpsFix = false;
+  float latitude = 0;
+  float longitude = 0;
+  float speedKmh = 0;
+  float heading = 0;
+  float accuracyM = 50;
+  float hdop = 99;
+  int satellites = 0;
+  int satellitesUsed = 0;
+  bool positionAccepted = false;
+  String gpsQuality = "NO_FIX";
+  String gpsTime;
+  int gsmCsq = 0;
+  float batteryVolts = 0;
+  int batteryPercent = 0;
+};
+LiveTelemetry cachedTelemetry;
+bool cachedTelemetryValid = false;
+
+int batteryPercentFromVoltage(float volts) {
+  if (volts >= BATTERY_FULL_VOLTS) return 100;
+  if (volts <= BATTERY_EMPTY_VOLTS) return 0;
+  float pct = (volts - BATTERY_EMPTY_VOLTS) * 100.0f / (BATTERY_FULL_VOLTS - BATTERY_EMPTY_VOLTS);
+  return constrain((int)(pct + 0.5f), 0, 100);
+}
+
+LiveTelemetry readLiveTelemetry(bool publish = true) {
+  LiveTelemetry t;
+  String csq = modemCommand("AT+CSQ", 3000, false);
+  String csqLine = responseLine(csq, "+CSQ:");
+  if (csqLine.length()) {
+    int colon = csqLine.indexOf(':');
+    t.gsmCsq = csvField(csqLine.substring(colon + 1), 0).toInt();
+    if (t.gsmCsq == 99) t.gsmCsq = 0;
+  }
+
+  String cbc = modemCommand("AT+CBC", 3000, false);
+  String cbcLine = responseLine(cbc, "+CBC:");
+  if (cbcLine.length()) {
+    int colon = cbcLine.indexOf(':');
+    String values = cbcLine.substring(colon + 1); values.trim();
+    int modemReportedPercent = constrain(csvField(values, 1).toInt(), 0, 100);
+    t.batteryVolts = csvField(values, 2).toFloat() / 1000.0f;
+    // SIM808 AT+CBC percentage is inaccurate on this board; derive percentage from calibrated voltage.
+    t.batteryPercent = batteryPercentFromVoltage(t.batteryVolts);
+    if (publish) emit("BATTERY_MODEM_PERCENT_RAW", String(modemReportedPercent));
+  }
+
+  if (!gnssPowered) ensureGnssPower(false);
+  String gps = modemCommand("AT+CGNSINF", 5000, false);
+  String gpsLine = responseLine(gps, "+CGNSINF:");
+  if (gpsLine.length()) {
+    int colon = gpsLine.indexOf(':');
+    String values = gpsLine.substring(colon + 1); values.trim();
+    t.gpsRunning = csvField(values, 0).toInt() == 1;
+    if (!t.gpsRunning) gnssPowered = false;
+    bool rawFix = csvField(values, 1).toInt() == 1;
+    t.gpsTime = csvField(values, 2);
+    float rawLatitude = csvField(values, 3).toFloat();
+    float rawLongitude = csvField(values, 4).toFloat();
+    // SIM808 CGNSINF field 6 is speed over ground in km/h. Do not multiply by 1.852.
+    float rawSpeedKmh = max(0.0f, csvField(values, 6).toFloat());
+    t.heading = csvField(values, 7).toFloat();
+    t.hdop = csvField(values, 10).toFloat();
+    if (t.hdop <= 0.0f) t.hdop = 99.0f;
+    t.satellites = csvField(values, 14).toInt();
+    t.satellitesUsed = csvField(values, 15).toInt();
+    t.accuracyM = constrain(t.hdop * 10.0f, 10.0f, 100.0f);
+    bool coordinatesValid = abs(rawLatitude) >= 0.000001f || abs(rawLongitude) >= 0.000001f;
+    bool qualityValid = rawFix && coordinatesValid && t.hdop <= GPS_MAX_HDOP && t.satellitesUsed >= GPS_MIN_SATELLITES_USED;
+    t.gpsFix = qualityValid;
+    t.positionAccepted = qualityValid;
+    t.speedKmh = (!qualityValid || rawSpeedKmh < GPS_STATIONARY_KMH) ? 0.0f : rawSpeedKmh;
+    if (!rawFix) t.gpsQuality = "NO_FIX";
+    else if (!coordinatesValid) t.gpsQuality = "INVALID_COORDINATES";
+    else if (t.satellitesUsed < GPS_MIN_SATELLITES_USED) t.gpsQuality = "LOW_SATELLITES";
+    else if (t.hdop > GPS_MAX_HDOP) t.gpsQuality = "POOR_HDOP";
+    else t.gpsQuality = t.speedKmh == 0.0f ? "STATIONARY_STABLE" : "MOVING_VALID";
+    if (qualityValid && t.speedKmh == 0.0f) {
+      stableLatSamples[stableSampleIndex] = rawLatitude;
+      stableLonSamples[stableSampleIndex] = rawLongitude;
+      stableSampleIndex = (stableSampleIndex + 1) % GPS_STABLE_SAMPLE_COUNT;
+      if (stableSampleTotal < GPS_STABLE_SAMPLE_COUNT) stableSampleTotal++;
+      float latSum = 0.0f, lonSum = 0.0f;
+      for (uint8_t i = 0; i < stableSampleTotal; i++) { latSum += stableLatSamples[i]; lonSum += stableLonSamples[i]; }
+      t.latitude = latSum / stableSampleTotal;
+      t.longitude = lonSum / stableSampleTotal;
+    } else if (qualityValid) {
+      stableSampleTotal = 0; stableSampleIndex = 0;
+      t.latitude = rawLatitude; t.longitude = rawLongitude;
+    } else {
+      t.latitude = 0.0f; t.longitude = 0.0f;
+    }
+  }
+
+  if (publish) {
+    emit("GPS_FIX", t.gpsFix ? "YES" : "NO");
+    emit("LATITUDE", String(t.latitude, 6));
+    emit("LONGITUDE", String(t.longitude, 6));
+    emit("SPEED_KMH", String(t.speedKmh, 1));
+    emit("HEADING", String(t.heading, 1));
+    emit("GSM_CSQ", String(t.gsmCsq));
+    emit("BATTERY_V", String(t.batteryVolts, 3));
+    emit("BATTERY_PERCENT", String(t.batteryPercent));
+    emit("BATTERY_CALIBRATION", "EMPTY_3.30V_FULL_3.84V");
+    emit("SATELLITES", String(t.satellites));
+    emit("SATELLITES_USED", String(t.satellitesUsed));
+    emit("GPS_HDOP", String(t.hdop, 1));
+    emit("GPS_ACCURACY_M", String(t.accuracyM, 1));
+    emit("GPS_QUALITY", t.gpsQuality);
+    emit("GPS_POSITION_ACCEPTED", t.positionAccepted ? "YES" : "NO");
+    emit("GPS_TIME", t.gpsTime.length() ? t.gpsTime : "NOT_REPORTED");
+    emit("GNSS_STATUS", !t.gpsRunning ? "NOT_RUNNING" : t.gpsFix ? "FIXED_VALIDATED" : "FIX_REJECTED_LOW_QUALITY");
+    emit("GNSS_RAW", gpsLine.length() ? gpsLine : "NO_CGNSINF_RESPONSE");
+  }
+  cachedTelemetry = t;
+  cachedTelemetryValid = true;
+  lastGnssPollMs = millis();
+  return t;
+}
+
+bool modemResponding() {
+  String response = modemCommand("AT", 1500, false);
+  return hasOK(response);
+}
+
+void pulseSIM808PowerKey() {
+  // Makerfabs V3.5 reference: POWER_KEY is D9, active LOW pulse.
+  pinMode(PIN_SIM808_POWER, OUTPUT);
+  digitalWrite(PIN_SIM808_POWER, HIGH);  // idle state
+  delay(100);
+  digitalWrite(PIN_SIM808_POWER, LOW);
+  delay(3000);
+  digitalWrite(PIN_SIM808_POWER, HIGH);
+  emit("MODEM_POWER", "PULSE_SENT");
+}
+
+bool ensureModemReady() {
+  if (modemResponding()) {
+    if (!modemReadySinceMs) modemReadySinceMs = millis();
+    emit("MODEM", "READY");
+    return true;
+  }
+  emit("MODEM", "NOT_RESPONDING_NO_RUNTIME_REPULSE");
+  return false;
+}
+
+bool runColdBootModemSequence() {
+  emit("COLD_BOOT_MODEM", "AT_CHECK_BEGIN");
+  for (uint8_t attempt = 1; attempt <= 4; attempt++) {
+    if (modemResponding()) {
+      modemReadySinceMs = millis(); coldBootSequenceComplete = true;
+      emit("COLD_BOOT_MODEM", "READY_WITHOUT_POWER_PULSE"); return true;
+    }
+    emit("COLD_BOOT_AT_RETRY", String(attempt)); delay(1500);
+  }
+  if (coldBootPowerPulseUsed) return false;
+  coldBootPowerPulseUsed = true;
+  emit("COLD_BOOT_MODEM", "ONE_SAFE_POWER_PULSE"); pulseSIM808PowerKey();
+  for (uint8_t step = 1; step <= 12; step++) {
+    delay(1500);
+    if (modemResponding()) {
+      modemReadySinceMs = millis(); coldBootSequenceComplete = true;
+      emit("COLD_BOOT_MODEM", "READY_AFTER_POWER_PULSE"); return true;
+    }
+    emit("COLD_BOOT_WAIT_MS", String(step * 1500));
+  }
+  coldBootSequenceComplete = true;
+  emit("COLD_BOOT_MODEM", "FAILED_AFTER_SINGLE_SAFE_PULSE"); return false;
+}
+
+bool ensureGnssPower(bool publish) {
+  // Never touch POWER_KEY here. Verify GNSS really reports running state = 1.
+  if (!modemResponding()) {
+    gnssPowered = false;
+    if (publish) emit("GNSS_STATUS", "MODEM_TEMPORARILY_UNAVAILABLE");
+    return false;
+  }
+
+  String before = modemCommand("AT+CGNSPWR?", 3000, false);
+  if (before.indexOf("+CGNSPWR: 1") >= 0) {
+    gnssPowered = true;
+    if (publish) {
+      emit("GNSS_POWER", "ON_VERIFIED");
+      emit("GNSS_STATUS_RAW", before);
+    }
+    return true;
+  }
+
+  emit("GNSS_POWER", "START_REQUESTED");
+  modemCommand("AT+CGNSPWR=1", 5000, false);
+  delay(750);
+  String after = modemCommand("AT+CGNSPWR?", 3000, false);
+  gnssPowered = after.indexOf("+CGNSPWR: 1") >= 0;
+
+  if (publish) {
+    emit("GNSS_POWER", gnssPowered ? "ON_VERIFIED" : "START_FAILED");
+    emit("GNSS_STATUS_RAW", after.length() ? after : "NO_RESPONSE");
+  }
+  return gnssPowered;
+}
+
+void readIdentity() {
+  if (!ensureModemReady()) { emit("MODEM_IMEI", "NOT_AVAILABLE"); return; }
+  String response=modemCommand("AT+GSN",3000,false);String digits;
+  for(unsigned int i=0;i<response.length();i++)if(isDigit(response[i]))digits+=response[i];
+  emit("MODEM_IMEI",digits.length()>=14?digits:"NOT_AVAILABLE");
+}
+void checkSIM() {
+  if (!ensureModemReady()) {
+    emit("SIM_STATUS", "MODEM_NOT_RESPONDING");
+    return;
+  }
+  String response = modemCommand("AT+CPIN?");
+  emit("SIM_STATUS", response.indexOf("READY") >= 0 ? "READY" : response);
+}
+void checkNetwork() {
+  if (!ensureModemReady()) {
+    emit("NETWORK", "MODEM_NOT_RESPONDING");
+    return;
+  }
+  String response = modemCommand("AT+CREG?");
+  bool registered = response.indexOf(",1") >= 0 || response.indexOf(",5") >= 0;
+  emit("NETWORK", registered ? "REGISTERED" : "NOT_REGISTERED");
+  emit("OPERATOR", responseLine(modemCommand("AT+COPS?", 5000, false), "+COPS:"));
+  LiveTelemetry telemetry = readLiveTelemetry(false);
+  emit("SIGNAL", String(telemetry.gsmCsq));
+}
+bool connectGPRS() {
+  if (!ensureModemReady()) { emit("GPRS", "MODEM_NOT_RESPONDING"); return false; }
+  if (!strlen(cfg.apn)) { emit("GPRS", "APN_NOT_SET"); return false; }
+  String reg = modemCommand("AT+CREG?", 5000, false);
+  bool registered = reg.indexOf(",1") >= 0 || reg.indexOf(",5") >= 0;
+  emit("NETWORK", registered ? "REGISTERED" : "NOT_REGISTERED");
+  if (!registered) { emit("GPRS", "WAITING_FOR_NETWORK_REGISTRATION"); return false; }
+  String attached = modemCommand("AT+CGATT?", 5000, false);
+  if (attached.indexOf("+CGATT: 1") < 0) {
+    modemCommand("AT+CGATT=1", 20000, false); delay(1500);
+    attached = modemCommand("AT+CGATT?", 5000, false);
+  }
+  if (attached.indexOf("+CGATT: 1") < 0) { emit("GPRS", "PACKET_ATTACH_FAILED"); return false; }
+  modemCommand("AT+SAPBR=0,1", 10000, false); delay(500);
+  modemCommand("AT+SAPBR=3,1,\"CONTYPE\",\"GPRS\"");
+  modemCommand(String("AT+SAPBR=3,1,\"APN\",\"") + cfg.apn + "\"");
+  if (strlen(cfg.apnUser)) modemCommand(String("AT+SAPBR=3,1,\"USER\",\"") + cfg.apnUser + "\"");
+  if (strlen(cfg.apnPass)) modemCommand(String("AT+SAPBR=3,1,\"PWD\",\"") + cfg.apnPass + "\"");
+  String bearer;
+  for (uint8_t attempt=1; attempt<=3; attempt++) {
+    emit("GPRS_OPEN_ATTEMPT", String(attempt));
+    modemCommand("AT+SAPBR=1,1", 30000, false); delay(1200);
+    bearer=modemCommand("AT+SAPBR=2,1", 6000, false);
+    if (bearer.indexOf("+SAPBR: 1,1") >= 0 && bearer.indexOf("0.0.0.0") < 0) {
+      emit("GPRS", "ATTACHED"); emit("GPRS_IP", bearer); return true;
+    }
+    modemCommand("AT+SAPBR=0,1",10000,false); delay(1000);
+  }
+  emit("GPRS", "FAILED_AFTER_3_ATTEMPTS"); emit("GPRS_IP", bearer); return false;
+}
+
+String jsonPayload() {
+  int raw1 = simulationMode ? percentToRaw(simAi1Percent) : analogRead(PIN_AI1);
+  int raw2 = simulationMode ? percentToRaw(simAi2Percent) : analogRead(PIN_AI2);
+  float p1 = rawToPercent(raw1), p2 = rawToPercent(raw2);
+  LiveTelemetry t = readLiveTelemetry(true);
+  String body = "{\"device_id\":\"" + String(cfg.deviceUid) + "\",\"sequence\":\"gsm-" + String(millis()) + "\",\"firmware\":\"" + String(FW) + "\",\"measurements\":[" +
+    "{\"point\":\"analog_1\",\"value\":" + String(p1, 2) + ",\"quality\":\"GOOD\"}," +
+    "{\"point\":\"analog_2\",\"value\":" + String(p2, 2) + ",\"quality\":\"GOOD\"}," +
+    "{\"point\":\"analog_1_volts\",\"value\":" + String(rawToVolts(raw1), 3) + ",\"quality\":\"GOOD\"}," +
+    "{\"point\":\"analog_2_volts\",\"value\":" + String(rawToVolts(raw2), 3) + ",\"quality\":\"GOOD\"}," +
+    "{\"point\":\"battery_v\",\"value\":" + String(t.batteryVolts, 3) + ",\"quality\":\"GOOD\"}," +
+    "{\"point\":\"battery_percent\",\"value\":" + String(t.batteryPercent) + ",\"quality\":\"GOOD\"}," +
+    "{\"point\":\"digital_output_1_feedback\",\"value\":" + String(do1State ? 1 : 0) + ",\"quality\":\"GOOD\"}," +
+    "{\"point\":\"digital_output_2_feedback\",\"value\":" + String(do2State ? 1 : 0) + ",\"quality\":\"GOOD\"}," +
+    "{\"point\":\"gps_fix\",\"value\":" + String(t.gpsFix ? 1 : 0) + ",\"quality\":\"GOOD\"}," +
+    "{\"point\":\"gsm_signal\",\"value\":" + String(t.gsmCsq) + ",\"quality\":\"GOOD\"}," +
+    "{\"point\":\"speed_kmh\",\"value\":" + String(t.speedKmh, 1) + ",\"quality\":\"GOOD\"}";
+  if(lastAirtimeZar>=0)body += ",{\"point\":\"airtime_balance_zar\",\"value\":" + String(lastAirtimeZar,2) + ",\"quality\":\"GOOD\"}";
+  if(lastDataMb>=0)body += ",{\"point\":\"data_remaining_mb\",\"value\":" + String(lastDataMb,1) + ",\"quality\":\"GOOD\"}";
+  body += "]";
+  if (t.gpsFix) {
+    body += ",\"location\":{\"latitude\":" + String(t.latitude, 6) + ",\"longitude\":" + String(t.longitude, 6) + ",\"speed_kmh\":" + String(t.speedKmh, 1) + ",\"heading\":" + String(t.heading, 1) + ",\"accuracy_m\":" + String(t.accuracyM, 1) + "}";
+  }
+  body += "}";
+  return body;
+}
+
+String waitForHttpAction(uint32_t timeoutMs) {
+  String response; uint32_t started=millis();
+  while (millis()-started < timeoutMs) {
+    while (MODEM.available()) {
+      response += char(MODEM.read());
+      if (response.indexOf("+HTTPACTION:") >= 0) { delay(150); while (MODEM.available()) response += char(MODEM.read()); response.trim(); return response; }
+    }
+    delay(5);
+  }
+  response.trim(); return response;
+}
+
+bool sendGSM() {
+  if (!strlen(cfg.deviceUid) || !strlen(cfg.deviceToken)) {
+    emit("UPLOAD", "DEVICE_IDENTITY_NOT_SET");
+    return false;
+  }
+  if (!connectGPRS()) return false;
+  modemCommand("AT+HTTPTERM", 2000, false);
+  if (!hasOK(modemCommand("AT+HTTPINIT", 5000))) {
+    emit("UPLOAD", "HTTP_INIT_FAILED");
+    return false;
+  }
+  modemCommand("AT+HTTPPARA=\"CID\",1");
+  String body = jsonPayload();
+  String signature = at360Signature(String(cfg.deviceToken), body);
+  emit("LEGACY_SIGNATURE", signature.length() == 64 ? "READY" : "FAILED");
+  if (signature.length() != 64) {
+    emit("UPLOAD", "SIGNATURE_FAILED");
+    modemCommand("AT+HTTPTERM", 2000, false);
+    return false;
+  }
+  String url = "http://" + String(cfg.apiHost) + String(cfg.apiPath);
+  modemCommand(String("AT+HTTPPARA=\"URL\",\"") + url + "\"");
+  modemCommand("AT+HTTPPARA=\"CONTENT\",\"application/json\"");
+  modemCommand(String("AT+HTTPPARA=\"USERDATA\",\"X-AT360-Signature: ") + signature + "\"");
+  String ready = modemCommand("AT+HTTPDATA=" + String(body.length()) + ",15000", 7000);
+  if (ready.indexOf("DOWNLOAD") < 0) {
+    emit("UPLOAD", "HTTP_DATA_NOT_READY");
+    modemCommand("AT+HTTPTERM", 2000, false);
+    return false;
+  }
+  MODEM.print(body);
+  delay(1200);
+  while (MODEM.available()) MODEM.read();
+  MODEM.println("AT+HTTPACTION=1");
+  String result = waitForHttpAction(45000UL);
+  emit("HTTP_ACTION", result.length() ? result : "NO_RESPONSE");
+  bool accepted = result.indexOf(",200,") >= 0 || result.indexOf(",201,") >= 0 || result.indexOf(",202,") >= 0;
+  emit("UPLOAD", accepted ? "ACCEPTED" : "FAILED");
+  modemCommand("AT+HTTPTERM", 3000, false);
+  return accepted;
+}
+
+float firstNumberAfter(const String &text, const String &marker) {
+  String upper=text; upper.toUpperCase(); String target=marker; target.toUpperCase();
+  int pos=upper.indexOf(target); if(pos<0)return -1.0f; pos+=target.length();
+  while(pos<(int)text.length() && !(isDigit(text[pos]) || text[pos]=='.' || text[pos]==','))pos++;
+  String n; while(pos<(int)text.length() && (isDigit(text[pos]) || text[pos]=='.' || text[pos]==',')){char c=text[pos++];if(c!=',')n+=c;}
+  return n.length()?n.toFloat():-1.0f;
+}
+void parseBalanceResponse(const String &response) {
+  lastBalanceRaw=response;
+  float airtime=firstNumberAfter(response,"R");
+  float data=firstNumberAfter(response,"DATA");
+  String upper=response; upper.toUpperCase();
+  if(data < 0) data=firstNumberAfter(response,"MB");
+  if(data >= 0 && upper.indexOf("GB")>=0 && upper.indexOf("MB")<0)data*=1024.0f;
+  if(airtime>=0)lastAirtimeZar=airtime;
+  if(data>=0)lastDataMb=data;
+  emit("AIRTIME_ZAR",lastAirtimeZar>=0?String(lastAirtimeZar,2):"NOT_PARSED");
+  emit("DATA_MB",lastDataMb>=0?String(lastDataMb,1):"NOT_PARSED");
+  emit("AIRTIME_STATE",lastAirtimeZar<0?"UNKNOWN":lastAirtimeZar<10?"CRITICAL":lastAirtimeZar<20?"LOW":"NORMAL");
+  emit("DATA_STATE",lastDataMb<0?"UNKNOWN":lastDataMb<100?"CRITICAL":lastDataMb<250?"LOW":"NORMAL");
+}
+String runUSSDQuery(const char *code, const String &label) {
+  if (!strlen(code)) { emit(label, "USSD_CODE_NOT_SET"); return ""; }
+  modemCommand("AT+CUSD=2",2000,false);
+  modemCommand("AT+CMGF=1",2000,false);
+  String result=modemCommand(String("AT+CUSD=1,\"")+code+"\",15",30000,false);
+  delay(1500);
+  while(MODEM.available())result+=char(MODEM.read());
+  result.trim(); emit(label,result.length()?result:"NO_RESPONSE");
+  parseBalanceResponse(result); return result;
+}
+void checkBalances() {
+  if(!ensureModemReady())return;
+  runUSSDQuery(strlen(cfg.dataUssd)?cfg.dataUssd:cfg.balanceUssd,"BALANCE_DETAIL");
+  lastBalanceCheckMs=millis();
+}
+void runUSSD(const char *code, const String &label) {
+  if (!strlen(code)) {
+    emit(label, "USSD_CODE_NOT_SET");
+    return;
+  }
+  modemCommand("AT+CUSD=1", 3000, false);
+  String result = modemCommand(String("AT+CUSD=1,\"") + code + "\",15", 25000, false);
+  emit(label, result.length() ? result : "NO_RESPONSE");
+  parseBalanceResponse(result);
+}
+
+void printStatus() {
+  int raw1 = simulationMode ? percentToRaw(simAi1Percent) : analogRead(PIN_AI1);
+  int raw2 = simulationMode ? percentToRaw(simAi2Percent) : analogRead(PIN_AI2);
+  emit("FIRMWARE", FW);
+  emit("PROFILE", "AT360_SIM808_TRACKER_2AI_2DO");
+  emit("MODE", simulationMode ? "Simulation" : "Live");
+  emit("AI1_RAW", String(raw1));
+  emit("AI1_VOLTS", String(rawToVolts(raw1), 3));
+  emit("AI1_PERCENT", String(rawToPercent(raw1), 1));
+  emit("AI2_RAW", String(raw2));
+  emit("AI2_VOLTS", String(rawToVolts(raw2), 3));
+  emit("AI2_PERCENT", String(rawToPercent(raw2), 1));
+  emit("DO1_FEEDBACK", (simulationMode ? simDo1 : do1State) ? "ON" : "OFF");
+  emit("DO2_FEEDBACK", (simulationMode ? simDo2 : do2State) ? "ON" : "OFF");
+  emit("DO1_MODE", do1PulseMode ? "PULSE" : "LATCHED");
+  emit("DO2_MODE", do2PulseMode ? "PULSE" : "LATCHED");
+  // READ_STATUS is intentionally modem-free. It must never overlap a GNSS/GSM AT transaction.
+  if (!simulationMode && cachedTelemetryValid) {
+    emit("GPS_FIX", cachedTelemetry.gpsFix ? "YES" : "NO");
+    emit("LATITUDE", String(cachedTelemetry.latitude, 6));
+    emit("LONGITUDE", String(cachedTelemetry.longitude, 6));
+    emit("SPEED_KMH", String(cachedTelemetry.speedKmh, 1));
+    emit("HEADING", String(cachedTelemetry.heading, 1));
+    emit("GSM_CSQ", String(cachedTelemetry.gsmCsq));
+    emit("BATTERY_V", String(cachedTelemetry.batteryVolts, 3));
+    emit("BATTERY_PERCENT", String(cachedTelemetry.batteryPercent));
+    emit("SATELLITES", String(cachedTelemetry.satellites));
+    emit("SATELLITES_USED", String(cachedTelemetry.satellitesUsed));
+    emit("GPS_HDOP", String(cachedTelemetry.hdop, 1));
+    emit("GPS_ACCURACY_M", String(cachedTelemetry.accuracyM, 1));
+    emit("GPS_QUALITY", cachedTelemetry.gpsQuality);
+    emit("GPS_POSITION_ACCEPTED", cachedTelemetry.positionAccepted ? "YES" : "NO");
+    emit("GPS_TIME", cachedTelemetry.gpsTime.length() ? cachedTelemetry.gpsTime : "NOT_REPORTED");
+  } else if (!simulationMode) {
+    emit("GPS_FIX", "NO");
+    emit("GNSS_STATUS", "WAITING_FOR_READ_TRACKING");
+  }
+  emit("APN", configured(cfg.apn));
+  emit("DEVICE_UID", configured(cfg.deviceUid));
+  emit("DEVICE_TOKEN", configured(cfg.deviceToken));
+  emit("UPLOAD_INTERVAL", String(cfg.uploadSeconds));
+  emit("UPLOAD_TRANSPORT", "SIGNED_HTTP_V1");
+  emit("UPLOAD_HOST", cfg.apiHost);
+  emit("UPLOAD_PATH", cfg.apiPath);
+
+  emit("AUTO_UPLOAD", autoUpload ? "ON" : "OFF");
+  emit("AUTO_UPLOAD_SAVED", cfg.autoUploadEnabled ? "ON" : "OFF");
+  emit("BALANCE_CHECK_INTERVAL", "6_HOURS");
+  emit("AIRTIME_ALERT_POLICY", "LOW_BELOW_R20;CRITICAL_BELOW_R10;RECOVER_ABOVE_R15");
+  emit("CONFIG_SAVED", (strlen(cfg.apn) && strlen(cfg.deviceUid) && strlen(cfg.deviceToken)) ? "YES" : "NO");
+  emit("IDENTITY_PERSISTENCE", (strlen(cfg.deviceUid) && strlen(cfg.deviceToken)) ? "FLASH_OK" : "MISSING");
+  emit("PIN_MAP", "AI1=A0;AI2=A1;DO1=D5;DO2=D6;D9=SIM808_POWER_KEY");
+}
+
+void saveField(const String &key, const String &value) {
+  if (key == "APN") safeCopy(cfg.apn, sizeof(cfg.apn), value);
+  else if (key == "APN_USER") safeCopy(cfg.apnUser, sizeof(cfg.apnUser), value);
+  else if (key == "APN_PASS") safeCopy(cfg.apnPass, sizeof(cfg.apnPass), value);
+  else if (key == "SIM_PIN") safeCopy(cfg.simPin, sizeof(cfg.simPin), value);
+  else if (key == "DEVICE_UID") safeCopy(cfg.deviceUid, sizeof(cfg.deviceUid), value);
+  else if (key == "DEVICE_TOKEN") safeCopy(cfg.deviceToken, sizeof(cfg.deviceToken), value);
+  else if (key == "BALANCE_USSD") safeCopy(cfg.balanceUssd, sizeof(cfg.balanceUssd), value);
+  else if (key == "DATA_USSD") safeCopy(cfg.dataUssd, sizeof(cfg.dataUssd), value);
+  else if (key == "UPLOAD_SECONDS") cfg.uploadSeconds = constrain(value.toInt(), 30, 86400);
+  else {
+    emit("SET", "UNKNOWN_FIELD");
+    return;
+  }
+  cfg.marker = CFG_MARKER;
+  configStore.write(cfg);
+  autoUpload = cfg.autoUploadEnabled && strlen(cfg.deviceUid) && strlen(cfg.deviceToken) && strlen(cfg.apn);
+  emit("SET", key + "_SAVED");
+}
+
+void commandOutput(uint8_t channel, bool on, bool pulse = false) {
+  if (simulationMode) {
+    if (channel == 1) {
+      simDo1 = true;
+      simDo1Started = pulse ? millis() : 0;
+    } else {
+      simDo2 = true;
+      simDo2Started = pulse ? millis() : 0;
+    }
+    emit("SIM_OUTPUT_STATE", "DO" + String(channel) + "=" + (on ? "ON" : "OFF"));
+    return;
+  }
+  if (channel == 1) setOutput(PIN_DO1, do1State, do1Started, on);
+  else setOutput(PIN_DO2, do2State, do2Started, on);
+  emit("OUTPUT_STATE", "DO" + String(channel) + "=" + (on ? "ON" : "OFF"));
+}
+
+void handleCommand(String command) {
+  command.trim();
+  if (!command.length()) return;
+  if (command == "HELLO" || command == "READ_STATUS" || command == "READ_IO") printStatus();
+  else if (command == "MODE_LIVE") {
+    simulationMode = false;
+    simDo1 = simDo2 = false;
+    forceOutputsOff();
+    emit("MODE", "Live");
+  } else if (command == "MODE_SIMULATION") {
+    simulationMode = true;
+    forceOutputsOff();
+    simDo1 = simDo2 = false;
+    emit("MODE", "Simulation");
+  } else if (command.startsWith("SIM_AI1=")) {
+    simAi1Percent = constrain(command.substring(8).toFloat(), 0.0f, 100.0f);
+    emit("SIM_SAVED", "AI1");
+  } else if (command.startsWith("SIM_AI2=")) {
+    simAi2Percent = constrain(command.substring(8).toFloat(), 0.0f, 100.0f);
+    emit("SIM_SAVED", "AI2");
+  } else if (command == "DO1_ON") commandOutput(1, true, false);
+  else if (command == "DO2_ON") commandOutput(2, true, false);
+  else if (command == "DO1_PULSE") commandOutput(1, true, true);
+  else if (command == "DO2_PULSE") commandOutput(2, true, true);
+  else if (command == "DO1_OFF") {
+    simDo1 = false;
+    setOutput(PIN_DO1, do1State, do1Started, false);
+    emit("OUTPUT_STATE", "DO1=OFF");
+  } else if (command == "DO2_OFF") {
+    simDo2 = false;
+    setOutput(PIN_DO2, do2State, do2Started, false);
+    emit("OUTPUT_STATE", "DO2=OFF");
+  } else if (command == "ALL_OFF") {
+    simDo1 = simDo2 = false;
+    forceOutputsOff();
+    emit("OUTPUT_STATE", "ALL=OFF");
+  } else if (command == "READ_TRACKING" || command == "CHECK_GPS") {
+    emit("MODEM_TRANSACTION", "TRACKING_BEGIN");
+    if (ensureGnssPower(true)) readLiveTelemetry(true);
+    else emit("GNSS_STATUS", "START_NOT_VERIFIED");
+    emit("MODEM_TRANSACTION", "TRACKING_END");
+  } else if (command == "GNSS_RESTART") {
+    modemCommand("AT+CGNSPWR=0", 3000, false);
+    delay(500);
+    gnssPowered = false;
+    ensureGnssPower(true);
+    emit("GNSS_STATUS", "RESTARTED_SEARCHING");
+  }
+  else if (command == "MODEM_POWER_PULSE") {
+    emit("MODEM_POWER", "MANUAL_PULSE_REQUESTED");
+    pulseSIM808PowerKey();
+    emit("MODEM", "MANUAL_START_WAIT_16_SECONDS");
+    delay(16000);
+    bool ready = modemResponding();
+    if (ready) modemReadySinceMs = millis();
+    emit("MODEM", ready ? "READY" : "NOT_RESPONDING_AFTER_MANUAL_PULSE");
+  }
+  else if (command == "READ_IDENTITY") readIdentity();
+  else if (command == "CHECK_SIM") checkSIM();
+  else if (command == "CHECK_NETWORK") checkNetwork();
+  else if (command == "CONNECT_GPRS") connectGPRS();
+  else if (command == "SEND_GSM") sendGSM();
+  else if (command == "CHECK_BALANCE") checkBalances();
+  else if (command == "CHECK_DATA") checkBalances();
+  else if (command == "FULL_GSM_TEST") {
+    checkSIM();
+    checkNetwork();
+    if (connectGPRS()) sendGSM();
+  } else if (command == "SAVE_CONFIG") {
+    cfg.marker = CFG_MARKER; configStore.write(cfg); emit("CONFIG_SAVED", "YES");
+  } else if (command == "AUTO_ON") {
+    cfg.autoUploadEnabled = 1; cfg.marker = CFG_MARKER; configStore.write(cfg);
+    Config verifyAutoOn = configStore.read();
+    cfg.autoUploadEnabled = verifyAutoOn.autoUploadEnabled ? 1 : 0;
+    autoUpload = cfg.autoUploadEnabled && strlen(cfg.deviceUid) && strlen(cfg.deviceToken) && strlen(cfg.apn);
+    lastUploadMs = millis(); lastUploadAttemptMs = 0;
+    emit("AUTO_UPLOAD", autoUpload ? "ON" : "BLOCKED_MISSING_CONFIG");
+  } else if (command == "AUTO_OFF") {
+    cfg.autoUploadEnabled = 0; cfg.marker = CFG_MARKER; configStore.write(cfg);
+    Config verifyAutoOff = configStore.read();
+    cfg.autoUploadEnabled = verifyAutoOff.autoUploadEnabled ? 1 : 0;
+    autoUpload = false; emit("AUTO_UPLOAD", "OFF");
+    emit("AUTO_UPLOAD_SAVED", cfg.autoUploadEnabled ? "ON" : "OFF");
+  } else if (command.startsWith("SET|")) {
+    int separator = command.indexOf('|', 4);
+    if (separator > 4) saveField(command.substring(4, separator), command.substring(separator + 1));
+    else emit("SET", "INVALID_FORMAT");
+  } else emit("UNKNOWN_COMMAND", command);
+}
+
+void setup() {
+  pinMode(PIN_AI1, INPUT);
+  pinMode(PIN_AI2, INPUT);
+  pinMode(PIN_DO1, OUTPUT);
+  pinMode(PIN_DO2, OUTPUT);
+  pinMode(PIN_SIM808_POWER, OUTPUT);
+  digitalWrite(PIN_SIM808_POWER, HIGH);  // POWER_KEY idle state
+  forceOutputsOff();
+  analogReadResolution(12);
+  CONSOLE.begin(CONSOLE_BAUD);
+  MODEM.begin(MODEM_BAUD);
+  loadConfig();
+  uint32_t started = millis();
+  while (!CONSOLE && millis() - started < 8000UL) delay(10);
+  delay(500);
+  emit("AT360_READY", FW);
+  emit("BOARD", "MADUINO_ZERO_SIM808_V35_SAMD21");
+  emit("SAFETY", "DO1_DO2_DEFAULT_OFF;LATCH_OR_PULSE;SIMULATION_PHYSICAL_LOCKOUT;D9_SIM808_POWER_KEY");
+  emit("MODEM_POWER_POLICY", "ONE_SAFE_COLD_BOOT_PULSE_THEN_NO_RUNTIME_REPULSE");
+  emit("SAFE_BOOT", "MODEM_AUTOSTART_AFTER_15_SECONDS");
+  bootStartedMs = millis();
+  lastGnssPollMs = millis();
+  lastBalanceCheckMs = millis() - BALANCE_CHECK_MS + 60000UL;
+  autoUpload = cfg.autoUploadEnabled && strlen(cfg.deviceUid) && strlen(cfg.deviceToken) && strlen(cfg.apn);
+  lastUploadMs = millis();
+  emit("AUTO_UPLOAD_START_DELAY", "30_SECONDS");
+  emit("AUTO_UPLOAD_SAVED", cfg.autoUploadEnabled ? "ON" : "OFF");
+  emit("PROVISIONING_STATE", autoUpload ? "PROVISIONED_AUTO_UPLOAD_ON" : "UNPROVISIONED");
+  printStatus();
+}
+
+void loop() {
+  while (CONSOLE.available()) {
+    char c = CONSOLE.read();
+    if (c == '\n') {
+      handleCommand(consoleLine);
+      consoleLine = "";
+    } else if (c != '\r') {
+      if (consoleLine.length() < 240) consoleLine += c;
+      else { consoleLine = ""; emit("COMMAND", "BUFFER_RESET"); }
+    }
+  }
+  if (do1State && do1Started && millis() - do1Started >= do1PulseMs) {
+    setOutput(PIN_DO1, do1State, do1Started, false);
+    emit("OUTPUT_STATE", "DO1=OFF");
+  }
+  if (do2State && do2Started && millis() - do2Started >= do2PulseMs) {
+    setOutput(PIN_DO2, do2State, do2Started, false);
+    emit("OUTPUT_STATE", "DO2=OFF");
+  }
+  if (simDo1 && simDo1Started && millis() - simDo1Started >= do1PulseMs) {
+    simDo1 = false;
+    emit("SIM_OUTPUT_STATE", "DO1=OFF");
+  }
+  if (simDo2 && simDo2Started && millis() - simDo2Started >= do2PulseMs) {
+    simDo2 = false;
+    emit("SIM_OUTPUT_STATE", "DO2=OFF");
+  }
+  if (!simulationMode && !safeBootModemChecked && millis() - bootStartedMs >= SAFE_BOOT_MODEM_DELAY_MS) {
+    safeBootModemChecked = true;
+    bool ready = runColdBootModemSequence();
+    emit("MODEM", ready ? "READY_AFTER_COLD_BOOT_SEQUENCE" : "COLD_BOOT_SEQUENCE_FAILED");
+    if (ready) { ensureGnssPower(true); checkSIM(); checkNetwork(); }
+  }
+  if (!simulationMode && safeBootModemChecked && millis() - lastBalanceCheckMs >= BALANCE_CHECK_MS) checkBalances();
+  if (autoUpload && safeBootModemChecked && millis() >= AUTO_UPLOAD_START_DELAY_MS) {
+    uint32_t intervalMs=cfg.uploadSeconds*1000UL;
+    bool due=millis()-lastUploadMs>=intervalMs;
+    bool retry=lastUploadAttemptMs && millis()-lastUploadAttemptMs>=UPLOAD_RETRY_MS;
+    if (due || retry) {
+      lastUploadAttemptMs=millis(); emit("AUTONOMOUS_UPLOAD", "BEGIN");
+      bool ok=ensureModemReady() && sendGSM();
+      if (ok) { lastUploadMs=millis(); lastUploadAttemptMs=0; emit("AUTONOMOUS_UPLOAD", "ACCEPTED"); }
+      else emit("AUTONOMOUS_UPLOAD", "FAILED_RETRY_IN_30_SECONDS");
+    }
+  }
+  delay(5);
+}

@@ -1,0 +1,12 @@
+AssetTrack 360 SIM808 REV14 Signed HTTP Autoconnect
+
+Cumulative merge based on REV13.
+Preserved: Claim Code provisioning, FlashStorage APN/UID/token/AUTO_ON, calibrated battery percentage, GPS quality filtering, safe D9 cold-start, autonomous retry, A0/A1 and D5/D6 behavior.
+Changed: SIM808 upload now uses the signed HTTP compatibility ingress because this modem firmware does not support the required modern HTTPS/TLS path.
+
+Required Railway variables:
+SIM808_LEGACY_INGRESS_ENABLED=true
+SIM808_LEGACY_HOST=sim808-ingest.wykiesautomation.co.za
+
+Required Cloudflare behavior:
+Allow HTTP POST for sim808-ingest.wykiesautomation.co.za/api/v1/sim808-legacy-ingest without HTTP-to-HTTPS redirect or browser challenge. Keep other AssetTrack hostnames HTTPS-only.
