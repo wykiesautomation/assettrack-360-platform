@@ -1,9 +1,0 @@
-{
-  "python_compile": "PASS",
-  "addresses_preserved": true,
-  "gap_seconds": 180,
-  "movement_confirmation": "adjacent edge or decisive speed-supported edge",
-  "stop_lock": "best-accuracy point in compact final cluster",
-  "rejected_points_add_distance": false,
-  "rejected_gaps_connected": false
-}
