@@ -970,144 +970,130 @@ def _distance_km(a,b):
     return 2*6371.0088*math.asin(min(1,math.sqrt(value)))
 
 def analyse_tracking_points(rows):
-    """Build a measured GPS route without inventing travel between observations.
+    """Build evidence-grade route segments without joining GPS gaps or stop drift.
 
-    Consecutive route-grade phone fixes are connected only while time, distance and
-    implied speed remain plausible. Accuracy-radius jitter is retained as stationary
-    evidence but does not add distance. Long gaps and impossible jumps always break
-    the polyline. This is measured GPS history, not road-snapped or predicted travel.
+    A line is drawn only where adjacent GPS edges are plausible and movement has
+    neighbouring support. Stationary drift, isolated displacement, stale gaps and
+    impossible jumps break the polyline. Rejected points never add distance and
+    never create a straight line to the next accepted point.
     """
     ordered=sorted(rows,key=lambda row:(aware(row.sampled_at),getattr(row,'id',0) or 0))
     rejected=[];rejection_counts={};valid=[]
-    def reject_values(row,reason):
-        rejected.append({'timestamp':aware(row.sampled_at).isoformat(),'latitude':row.latitude,'longitude':row.longitude,'accuracy':row.accuracy_m,'speed':row.speed_kmh,'reason':reason})
+    def reject_point(point,reason):
+        rejected.append(dict(point,reason=reason))
         rejection_counts[reason]=rejection_counts.get(reason,0)+1
+    def reject_row(row,reason):
+        reject_point({'timestamp':aware(row.sampled_at).isoformat(),'latitude':row.latitude,'longitude':row.longitude,'accuracy':row.accuracy_m,'speed':row.speed_kmh},reason)
     for row in ordered:
         try:
             lat=float(row.latitude);lon=float(row.longitude);acc=max(3.0,float(row.accuracy_m or 0));speed=max(0.0,float(row.speed_kmh or 0))
         except (TypeError,ValueError):
-            reject_values(row,'INVALID_PAYLOAD');continue
+            reject_row(row,'INVALID_PAYLOAD');continue
         if not(-90<=lat<=90 and -180<=lon<=180) or (abs(lat)<.000001 and abs(lon)<.000001):
-            reject_values(row,'INVALID_COORDINATES');continue
+            reject_row(row,'INVALID_COORDINATES');continue
         if acc>100:
-            reject_values(row,'POOR_ACCURACY');continue
+            reject_row(row,'POOR_ACCURACY');continue
         sequence=str(getattr(row,'sequence','') or '')
         trip_id=sequence.split('|',1)[0] if sequence.startswith('trip-') and '|' in sequence else None
         valid.append({'latitude':lat,'longitude':lon,'accuracy':acc,'speed':speed,'timestamp':aware(row.sampled_at).isoformat(),'trip_id':trip_id})
 
-    segments=[];current=[];accepted=[];stops=[];moving_seconds=0.0;stationary_started=None;stationary_point=None;journey_has_moved=False
+    # First split observations at factual boundaries. The 180 second gap is also
+    # used by mobile tracking ingestion, so the map cannot silently bridge it.
+    chains=[];chain=[]
     for point in valid:
-        if not current:
-            current=[point];stationary_started=None;stationary_point=point;continue
-        previous=current[-1]
-        # Manual Start/Stop trip identity is authoritative. Stops remain inside the trip.
-        if (previous.get('trip_id') or point.get('trip_id')) and previous.get('trip_id') != point.get('trip_id'):
-            if len(current)>=2 and journey_has_moved:segments.append(current)
-            current=[point];stationary_started=None;stationary_point=point;journey_has_moved=False;continue
-        seconds=(datetime.fromisoformat(point['timestamp'])-datetime.fromisoformat(previous['timestamp'])).total_seconds()
-        if seconds<=0:
-            continue
-        # Keep one real journey intact across short mobile/browser reporting gaps.
-        if seconds>900 and not (previous.get('trip_id') and previous.get('trip_id')==point.get('trip_id')):
-            if len(current)>=2 and journey_has_moved:segments.append(current)
-            current=[point];stationary_started=None;stationary_point=point;journey_has_moved=False;continue
-        metres=_distance_dict(previous,point)*1000
-        implied_kmh=(metres/seconds)*3.6
-        reported=max(float(previous.get('speed') or 0),float(point.get('speed') or 0))
-        # Validate by elapsed time and implied speed, never a fixed distance.
-        plausible_ceiling=180.0 if reported<3.0 else min(180.0,max(90.0,reported*1.8+35.0))
-        if implied_kmh>plausible_ceiling:
-            rejection_counts['IMPOSSIBLE_JUMP']=rejection_counts.get('IMPOSSIBLE_JUMP',0)+1
-            rejected.append(dict(point,reason='IMPOSSIBLE_JUMP'))
-            if len(current)>=2 and journey_has_moved:segments.append(current)
-            current=[point];stationary_started=None;stationary_point=point;journey_has_moved=False;continue
-        jitter_radius=max(6.0,min(25.0,(previous['accuracy']+point['accuracy'])*0.35))
-        if metres<=jitter_radius:
-            if stationary_started is None:
-                stationary_started=datetime.fromisoformat(previous['timestamp']);stationary_point=previous
-            # Keep the latest measured fix on the segment without turning jitter into distance.
-            current[-1]=point
-            continue
-        if implied_kmh<0.5:
-            current[-1]=point;continue
-        if stationary_started is not None and journey_has_moved:
-            duration=(datetime.fromisoformat(point['timestamp'])-stationary_started).total_seconds()
-            if duration>=180:
-                stops.append({'started_at':stationary_started.isoformat(),'ended_at':point['timestamp'],'minutes':round(duration/60),'latitude':stationary_point['latitude'],'longitude':stationary_point['longitude'],'accuracy':stationary_point['accuracy'],'reason':'CONFIRMED_STOP'})
-        stationary_started=None;stationary_point=None
-        current.append(point);journey_has_moved=True;moving_seconds+=seconds
-    if len(current)>=2 and journey_has_moved:segments.append(current)
+        if not chain:chain=[point];continue
+        previous=chain[-1]
+        a=datetime.fromisoformat(previous['timestamp']);b=datetime.fromisoformat(point['timestamp'])
+        seconds=(b-a).total_seconds()
+        trip_change=bool((previous.get('trip_id') or point.get('trip_id')) and previous.get('trip_id')!=point.get('trip_id'))
+        if seconds<=0 or seconds>180 or a.date()!=b.date() or trip_change:
+            if seconds>180:reject_point(point,'TRACKING_GAP')
+            if chain:chains.append(chain)
+            chain=[point];continue
+        chain.append(point)
+    if chain:chains.append(chain)
 
-    # Only points belonging to a continuous, plausible movement segment are route evidence.
-    seen=set()
+    segments=[];stops=[]
+    for chain in chains:
+        if len(chain)<2:continue
+        edges=[]
+        for index,(a,b) in enumerate(zip(chain,chain[1:])):
+            seconds=(datetime.fromisoformat(b['timestamp'])-datetime.fromisoformat(a['timestamp'])).total_seconds()
+            metres=_distance_dict(a,b)*1000
+            derived=(metres/seconds)*3.6 if seconds>0 else 9999.0
+            reported=max(float(a.get('speed') or 0),float(b.get('speed') or 0))
+            # Movement must clear the combined accuracy envelope. A larger envelope
+            # is deliberate near a stop where phone GPS wanders between properties.
+            envelope=max(25.0,min(150.0,(float(a['accuracy'])+float(b['accuracy']))*1.35))
+            plausible=0<seconds<=180 and derived<=160.0
+            candidate=plausible and metres>envelope and derived>=2.0 and (reported>=2.0 or metres>=60.0)
+            edges.append({'index':index,'candidate':candidate,'plausible':plausible,'metres':metres,'derived':derived,'reported':reported,'envelope':envelope})
+            if not plausible:reject_point(b,'IMPOSSIBLE_JUMP')
+            elif metres>envelope and not candidate:reject_point(b,'UNCONFIRMED_GPS_DRIFT')
+
+        confirmed=[]
+        for i,edge in enumerate(edges):
+            if not edge['candidate']:
+                confirmed.append(False);continue
+            adjacent=(i>0 and edges[i-1]['candidate']) or (i+1<len(edges) and edges[i+1]['candidate'])
+            decisive=edge['reported']>=8.0 and edge['metres']>=max(80.0,edge['envelope']*1.6)
+            ok=bool(adjacent or decisive)
+            confirmed.append(ok)
+            if not ok:reject_point(chain[i+1],'ISOLATED_MOVEMENT')
+
+        current=[]
+        for i,ok in enumerate(confirmed):
+            if ok:
+                if not current:current=[chain[i]]
+                if current[-1]['timestamp']!=chain[i+1]['timestamp']:current.append(chain[i+1])
+            else:
+                if len(current)>=2:segments.append(current)
+                current=[]
+        if len(current)>=2:segments.append(current)
+
+        # Record a stop anchor from the final compact cluster, but do not append all
+        # drifting fixes to the route. Coordinates remain authoritative evidence.
+        tail=chain[-6:]
+        if len(tail)>=2:
+            radius=max(_distance_dict(tail[0],x)*1000 for x in tail[1:])
+            duration=(datetime.fromisoformat(tail[-1]['timestamp'])-datetime.fromisoformat(tail[0]['timestamp'])).total_seconds()
+            if duration>=60 and radius<=max(35.0,min(120.0,max(x['accuracy'] for x in tail)*1.5)):
+                anchor=min(tail,key=lambda x:x['accuracy'])
+                stops.append({'started_at':tail[0]['timestamp'],'ended_at':tail[-1]['timestamp'],'minutes':round(duration/60),'latitude':anchor['latitude'],'longitude':anchor['longitude'],'accuracy':anchor['accuracy'],'reason':'CONFIRMED_STOP_LOCK'})
+
+    accepted=[];seen=set()
     for segment in segments:
         for point in segment:
-            key=point['timestamp']
-            if key not in seen:accepted.append(point);seen.add(key)
-    distance=0.0;journeys=[]
-    for number,segment in enumerate(segments,1):
-        total=0.0
+            if point['timestamp'] not in seen:
+                accepted.append(point);seen.add(point['timestamp'])
+
+    trips=[]
+    for segment in segments:
+        total_km=0.0;moving_seconds=0.0;interval_speeds=[]
         for a,b in zip(segment,segment[1:]):
-            metres=_distance_dict(a,b)*1000
-            jitter=max(6.0,min(25.0,(a['accuracy']+b['accuracy'])*0.35))
-            if metres>jitter:total+=metres/1000
-        distance+=total
-        journeys.append({'number':number,'started_at':segment[0]['timestamp'],'ended_at':segment[-1]['timestamp'],'point_count':len(segment),'distance_km':round(total,3),'maximum_speed':round(max(float(x.get('speed') or 0) for x in segment),1)})
-    stopped_minutes=sum(x['minutes'] for x in stops)
-    maximum=max([float(x.get('speed') or 0) for x in accepted] or [0])
-    last=valid[-1] if valid else None
-    state='MOVING' if accepted and (accepted[-1].get('speed') or 0)>=3 else 'STATIONARY' if valid else 'WAITING_FOR_GPS'
-    confidence=max(0,min(100,round(100-(len(rejected)/max(1,len(ordered)))*100)))
-    # Reconstruct authoritative customer trips. A trip is a continuous chain of
-    # route-grade GPS fixes. Separate days, tracking gaps, sustained stationary
-    # periods and impossible jumps always create a new journey.
-    trips=[];trip=[];stationary_started=None
-    def finish_trip(points):
-        if len(points)<3:return
-        total_km=0.0;moving_seconds=0.0;interval_speeds=[];reported=[]
-        for a,b in zip(points,points[1:]):
             seconds=(datetime.fromisoformat(b['timestamp'])-datetime.fromisoformat(a['timestamp'])).total_seconds()
-            if seconds<=0 or seconds>900:continue
-            km=_distance_dict(a,b);implied=km/(seconds/3600.0)
-            jitter=max(6.0,min(25.0,(float(a.get('accuracy') or 0)+float(b.get('accuracy') or 0))*0.35))
-            if km*1000<=jitter or implied>180:continue
-            total_km+=km;moving_seconds+=seconds;interval_speeds.append(implied)
-            reported.extend([float(a.get('speed') or 0),float(b.get('speed') or 0)])
-        if total_km<0.10 or moving_seconds<20:return
-        # Maximum speed requires neighbouring support. An isolated phone-reported
-        # spike is ignored unless adjacent reported values or calculated intervals
-        # reach at least 80% of it.
-        point_speeds=[float(x.get('speed') or 0) for x in points]
-        supported_reported=[]
-        for index in range(1,len(point_speeds)-1):
-            window=sorted(point_speeds[index-1:index+2])
-            supported_reported.append(window[1])
-        candidates=supported_reported+[x for x in interval_speeds if x<=140]
-        maximum=max(candidates or [0.0])
-        trips.append({'number':len(trips)+1,'trip_id':f"TRIP-{len(trips)+1:03d}",'started_at':points[0]['timestamp'],'ended_at':points[-1]['timestamp'],'start':points[0],'end':points[-1],'point_count':len(points),'distance_km':round(total_km,3),'maximum_speed':round(maximum,1),'movement_seconds':round(moving_seconds),'duration_seconds':round((datetime.fromisoformat(points[-1]['timestamp'])-datetime.fromisoformat(points[0]['timestamp'])).total_seconds()),'route_quality':max(0,min(100,round(100-(len(rejected)/max(1,len(ordered)))*100))),'points':points})
-    for point in valid:
-        if not trip:trip=[point];stationary_started=None;continue
-        previous=trip[-1];a=datetime.fromisoformat(previous['timestamp']);b=datetime.fromisoformat(point['timestamp']);seconds=(b-a).total_seconds();metres=_distance_dict(previous,point)*1000;implied=(metres/seconds)*3.6 if seconds>0 else 9999
-        explicit_trip_change=bool(previous.get('trip_id') and point.get('trip_id') and previous.get('trip_id')!=point.get('trip_id'))
-        new_day=a.date()!=b.date();gap=seconds<=0 or seconds>900;impossible=implied>180
-        jitter=max(6.0,min(25.0,(float(previous.get('accuracy') or 0)+float(point.get('accuracy') or 0))*0.35))
-        stationary=metres<=jitter and max(float(previous.get('speed') or 0),float(point.get('speed') or 0))<3
-        if explicit_trip_change or new_day or gap or impossible:
-            finish_trip(trip);trip=[point];stationary_started=None;continue
-        if stationary:
-            if stationary_started is None:stationary_started=a
-            # Keep ordinary traffic/customer stops inside the same journey.
-            if (b-stationary_started).total_seconds()>=1200:
-                finish_trip(trip);trip=[point];stationary_started=None
-            else:trip.append(point)
-            continue
-        stationary_started=None;trip.append(point)
-    finish_trip(trip)
+            if seconds<=0 or seconds>180:continue
+            km=_distance_dict(a,b);derived=km/(seconds/3600.0)
+            if derived>160:continue
+            total_km+=km;moving_seconds+=seconds;interval_speeds.append(derived)
+        if total_km<0.03 or moving_seconds<5:continue
+        point_speeds=[float(x.get('speed') or 0) for x in segment]
+        supported=[]
+        for index in range(1,len(point_speeds)-1):supported.append(sorted(point_speeds[index-1:index+2])[1])
+        maximum=max(supported+[x for x in interval_speeds if x<=140] or [0.0])
+        trips.append({'number':len(trips)+1,'trip_id':segment[0].get('trip_id') or f"TRIP-{len(trips)+1:03d}",'started_at':segment[0]['timestamp'],'ended_at':segment[-1]['timestamp'],'start':segment[0],'end':segment[-1],'point_count':len(segment),'distance_km':round(total_km,3),'maximum_speed':round(maximum,1),'movement_seconds':round(moving_seconds),'duration_seconds':round((datetime.fromisoformat(segment[-1]['timestamp'])-datetime.fromisoformat(segment[0]['timestamp'])).total_seconds()),'route_quality':max(0,min(100,round(100-(len(rejected)/max(1,len(ordered)))*100))),'points':segment})
+
     display_segments=[x['points'] for x in trips]
-    display_distance_km=sum(x['distance_km'] for x in trips);display_moving_seconds=sum(x['movement_seconds'] for x in trips);display_maximum_speed=max([x['maximum_speed'] for x in trips] or [0.0])
+    display_distance_km=sum(x['distance_km'] for x in trips)
+    display_moving_seconds=sum(x['movement_seconds'] for x in trips)
+    display_maximum_speed=max([x['maximum_speed'] for x in trips] or [0.0])
     display_journeys=[{k:v for k,v in x.items() if k!='points'} for x in trips]
-    current_speed=float(valid[-1].get('speed') or 0) if valid else 0.0
-    return {'points':accepted,'last':last,'accepted':accepted,'rejected':rejected,'segments':segments,'display_segments':display_segments,'trips':trips,'journeys':display_journeys,'stops':stops,'total_km':round(display_distance_km,2),'distance_km':round(display_distance_km,2),'current_speed':round(current_speed,1),'max_speed':round(display_maximum_speed),'maximum_speed':round(display_maximum_speed),'moving_minutes':round(display_moving_seconds/60),'movement_minutes':round(display_moving_seconds/60),'stopped_minutes':stopped_minutes,'stationary_minutes':stopped_minutes,'rejection_counts':rejection_counts,'confidence':confidence,'state':state,'raw_count':len(ordered),'movement_count':sum(len(x) for x in display_segments),'drift_count':max(0,len(valid)-sum(len(x) for x in display_segments)),'rejected_count':len(rejected),'low_quality_count':sum(1 for x in valid if x['accuracy']>50),'raw_speed':valid[-1]['speed'] if valid else None,'observations':valid}
+    last=valid[-1] if valid else None
+    current_speed=float(last.get('speed') or 0) if last else 0.0
+    state='MOVING' if current_speed>=3 else 'STATIONARY' if valid else 'WAITING_FOR_GPS'
+    confidence=max(0,min(100,round(100-(len(rejected)/max(1,len(ordered)))*100)))
+    stopped_minutes=sum(x['minutes'] for x in stops)
+    return {'points':accepted,'last':last,'accepted':accepted,'rejected':rejected,'segments':segments,'display_segments':display_segments,'trips':trips,'journeys':display_journeys,'stops':stops,'total_km':round(display_distance_km,2),'distance_km':round(display_distance_km,2),'current_speed':round(current_speed,1),'max_speed':round(display_maximum_speed),'maximum_speed':round(display_maximum_speed),'moving_minutes':round(display_moving_seconds/60),'movement_minutes':round(display_moving_seconds/60),'stopped_minutes':round(stopped_minutes),'stationary_minutes':round(stopped_minutes),'state':state,'confidence':confidence,'raw_count':len(ordered),'movement_count':len(accepted),'drift_count':rejection_counts.get('UNCONFIRMED_GPS_DRIFT',0)+rejection_counts.get('ISOLATED_MOVEMENT',0),'rejected_count':len(rejected),'rejection_counts':rejection_counts,'observations':valid}
 
 def _distance_dict(a,b):
     import math
