@@ -1323,24 +1323,36 @@ def build_validated_trips(rows,speed_limit=60.0):
             candidate=0<dt<=900 and metres>threshold and 1.0<=derived<=160.0
             edges.append({'i':i,'candidate':candidate,'km':km,'speed':derived,'seconds':dt})
 
-        # One isolated edge can be multipath drift. Movement requires an adjacent
-        # candidate edge, or a decisive 60 m displacement beyond the uncertainty.
+        # Strict continuity: an isolated displacement is never enough, even when
+        # it is large. Movement requires at least two consecutive plausible edges.
+        # This prevents straight cyan shortcuts across missing or rejected GPS data.
         accepted_edges=[]
         for i,edge in enumerate(edges):
             if not edge['candidate']:continue
             adjacent=(i>0 and edges[i-1]['candidate']) or (i+1<len(edges) and edges[i+1]['candidate'])
-            decisive=edge['km']*1000>=max(60.0,(chain[i]['accuracy']+chain[i+1]['accuracy'])*2.0)
-            if adjacent or decisive:accepted_edges.append(edge)
-            else:rejected.append({'reason':'UNCONFIRMED_GPS_DRIFT','timestamp':chain[i+1]['timestamp']})
+            if adjacent:accepted_edges.append(edge)
+            else:rejected.append({'reason':'ISOLATED_MOVEMENT','timestamp':chain[i+1]['timestamp']})
 
         total=sum(x['km'] for x in accepted_edges)
         moving_seconds=sum(x['seconds'] for x in accepted_edges)
         explicit=bool(chain[0].get('trip_id'))
         if not explicit and (total<0.10 or moving_seconds<20):continue
 
-        route_indices={0}
-        for edge in accepted_edges:route_indices.update((edge['i'],edge['i']+1))
-        route=[chain[i] for i in sorted(route_indices)] if accepted_edges else [chain[0]]
+        # Preserve separate contiguous runs. Never flatten disconnected runs into
+        # one polyline because that invents a diagonal line across the evidence gap.
+        route_segments=[];edge_run=[]
+        for edge in accepted_edges:
+            if edge_run and edge['i']!=edge_run[-1]['i']+1:
+                indices={edge_run[0]['i']}
+                for item in edge_run:indices.update((item['i'],item['i']+1))
+                route_segments.append([chain[index] for index in sorted(indices)])
+                edge_run=[]
+            edge_run.append(edge)
+        if edge_run:
+            indices={edge_run[0]['i']}
+            for item in edge_run:indices.update((item['i'],item['i']+1))
+            route_segments.append([chain[index] for index in sorted(indices)])
+        route=[point for segment in route_segments for point in segment] if route_segments else [chain[0]]
         validated_speeds=[x['speed'] for x in accepted_edges]
         maximum=max(validated_speeds or [0.0])
         stopped_seconds=max(0.0,duration-moving_seconds)
@@ -1355,7 +1367,7 @@ def build_validated_trips(rows,speed_limit=60.0):
             'trip_id':chain[0].get('trip_id'),'distance_km':round(total,3),'maximum_speed':round(maximum),
             'average_speed':round(total/(moving_seconds/3600),1) if moving_seconds else 0,
             'quality':quality,'point_count':len(chain),'rejected_count':len(rejected),'route':route,
-            'route_end':route_end,'endpoint_source':endpoint_source,
+            'route_segments':route_segments,'route_end':route_end,'endpoint_source':endpoint_source,
             'speed_profile':[round(x['speed'],1) for x in accepted_edges] or [0.0],
             'overspeed_episodes':trip_overspeed_episodes([round(x['speed'],1) for x in accepted_edges],speed_limit),
             'start':route[0],'end':endpoint,'stationary':not bool(accepted_edges)})
