@@ -172,17 +172,7 @@ def render_seo_page(slug):
     return render_template("public_landing.html", page=page, schema=schema, faq_schema=faq_schema, site_url=SITE_URL)
 
 
-# AssetTrack 360 public positioning guard. Dedicated fleet/truck marketing belongs
-# to the separate FleetTrack 360 platform and is deliberately excluded here.
-for _assettrack_excluded_slug in (
-    "fleet-tracking-south-africa",
-    "vehicle-gps-tracking",
-    "fleet-tracking-api",
-    "fleet-tracking",
-):
-    SEO_PAGES.pop(_assettrack_excluded_slug, None)
-
-
+# Fleet tracking pages remain part of AssetTrack 360 and are served through the shared SEO landing-page route.
 # Product-specific AssetTrack 360 public pages.
 SEO_PAGES.update({
  "industrial-asset-monitoring":{"path":"/industrial-asset-monitoring","title":"Industrial Asset Monitoring South Africa | AssetTrack 360","description":"Monitor industrial assets, verified signals, alarms and device health with capability-aware hardware profiles and secure customer workspaces.","eyebrow":"INDUSTRIAL ASSET MONITORING","heading":"Connect verified asset signals to clear operational evidence.","intro":"AssetTrack 360 links sites, assets, devices and supported signals while keeping measured, scaled and advisory information clearly distinguished.","primary_keyword":"industrial asset monitoring South Africa","features":[["Capability-aware monitoring","Offer only signals supported by the selected board, wiring and protocol profile."],["Engineering units","Scale supported inputs into litres, pressure, temperature, current, runtime and other operational values."],["Alarm evidence","Retain severity, state, acknowledgement and measurement context."],["Customer isolation","Keep every site, asset, device and reading tenant-scoped."]],"faq":[["Can unsupported inputs be configured?","No. Public and customer workflows should expose only verified capabilities for the selected device profile."]]},
