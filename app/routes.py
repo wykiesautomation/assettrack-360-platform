@@ -14,6 +14,7 @@ from .route_intelligence import match_route, reverse_geocode, route_quality
 from .security_privacy import POLICY_VERSION,audit,consent_for_device,settings_for,evaluate_mobile,FEATURE_KEYS,MANDATORY_CONTROLS,fleet_defaults_for,entitlement_map,effective_features
 from .seo import SEO_PAGES, render_seo_page
 from .device_profiles import get_profile, public_profiles, profile_for_device
+from .tracking_validator import validate_movement_segments
 bp=Blueprint('main',__name__)
 _calibration_schema_ready=False
 
@@ -1263,7 +1264,7 @@ def build_validated_trips(rows,speed_limit=60.0):
         try:
             sequence=str(getattr(row,'sequence','') or '')
             trip_id=sequence.split('|',1)[0] if sequence.startswith('trip-') and '|' in sequence else None
-            point={'latitude':float(row.latitude),'longitude':float(row.longitude),'accuracy':max(3.0,float(row.accuracy_m or 0)),'reported_speed':max(0.0,float(row.speed_kmh or 0)),'timestamp':aware(row.sampled_at).isoformat(),'trip_id':trip_id}
+            point={'latitude':float(row.latitude),'longitude':float(row.longitude),'accuracy':max(3.0,float(row.accuracy_m or 0)),'reported_speed':max(0.0,float(row.speed_kmh or 0)),'heading':float(getattr(row,'heading',0) or 0),'timestamp':aware(row.sampled_at).isoformat(),'trip_id':trip_id}
         except (TypeError,ValueError):
             rejected.append({'reason':'INVALID_PAYLOAD'});continue
         if not(-90<=point['latitude']<=90 and -180<=point['longitude']<=180) or (abs(point['latitude'])<.000001 and abs(point['longitude'])<.000001):
@@ -1313,45 +1314,14 @@ def build_validated_trips(rows,speed_limit=60.0):
                 'overspeed_episodes':[],'start':anchor,'end':anchor,'stationary':True})
             continue
 
-        # Candidate movement edges must clear the combined accuracy envelope,
-        # cover at least 25 m and produce a plausible measured speed.
-        edges=[]
-        for i,(a,b) in enumerate(zip(chain,chain[1:])):
-            dt=(datetime.fromisoformat(b['timestamp'])-datetime.fromisoformat(a['timestamp'])).total_seconds()
-            km=_distance_dict(a,b);metres=km*1000;derived=km/(dt/3600) if dt>0 else 9999
-            threshold=max(25.0,min(120.0,(a['accuracy']+b['accuracy'])*1.25))
-            candidate=0<dt<=900 and metres>threshold and 1.0<=derived<=160.0
-            edges.append({'i':i,'candidate':candidate,'km':km,'speed':derived,'seconds':dt})
-
-        # Strict continuity: an isolated displacement is never enough, even when
-        # it is large. Movement requires at least two consecutive plausible edges.
-        # This prevents straight cyan shortcuts across missing or rejected GPS data.
-        accepted_edges=[]
-        for i,edge in enumerate(edges):
-            if not edge['candidate']:continue
-            adjacent=(i>0 and edges[i-1]['candidate']) or (i+1<len(edges) and edges[i+1]['candidate'])
-            if adjacent:accepted_edges.append(edge)
-            else:rejected.append({'reason':'ISOLATED_MOVEMENT','timestamp':chain[i+1]['timestamp']})
-
-        total=sum(x['km'] for x in accepted_edges)
-        moving_seconds=sum(x['seconds'] for x in accepted_edges)
+        validation=validate_movement_segments(chain)
+        accepted_edges=validation['accepted_edges']
+        route_segments=validation['segments']
+        rejected.extend(validation['rejected'])
+        total=sum(edge['km'] for edge in accepted_edges)
+        moving_seconds=sum(edge['seconds'] for edge in accepted_edges)
         explicit=bool(chain[0].get('trip_id'))
         if not explicit and (total<0.10 or moving_seconds<20):continue
-
-        # Preserve separate contiguous runs. Never flatten disconnected runs into
-        # one polyline because that invents a diagonal line across the evidence gap.
-        route_segments=[];edge_run=[]
-        for edge in accepted_edges:
-            if edge_run and edge['i']!=edge_run[-1]['i']+1:
-                indices={edge_run[0]['i']}
-                for item in edge_run:indices.update((item['i'],item['i']+1))
-                route_segments.append([chain[index] for index in sorted(indices)])
-                edge_run=[]
-            edge_run.append(edge)
-        if edge_run:
-            indices={edge_run[0]['i']}
-            for item in edge_run:indices.update((item['i'],item['i']+1))
-            route_segments.append([chain[index] for index in sorted(indices)])
         route=[point for segment in route_segments for point in segment] if route_segments else [chain[0]]
         validated_speeds=[x['speed'] for x in accepted_edges]
         maximum=max(validated_speeds or [0.0])
