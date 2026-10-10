@@ -14,7 +14,7 @@ jobs:
     steps:
       - name: Check backend
         env:
-          CHECK_URL: https://YOUR-APP.onrender.com/health
+          CHECK_URL: https://assettrack360.wykiesautomation.co.za/health
         run: |
           curl --fail --silent --show-error \
             --connect-timeout 15 --max-time 90 \
