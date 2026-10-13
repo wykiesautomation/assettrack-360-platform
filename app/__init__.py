@@ -187,9 +187,7 @@ def create_app(test_config=None):
     with app.app_context():
         from . import edge_models  # Registers REV20A tables before create_all.
         initialise_schema_safely(app)
-        from .trend_cleanup import cleanup_due
-        try:cleanup_due(force=False)
-        except Exception:app.logger.exception("Startup trend cleanup failed safely")
+        app.logger.warning("Retention cleanup disabled: history preservation repair REV1")
 
         email = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
         password = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "")
@@ -265,16 +263,7 @@ def create_app(test_config=None):
                 )
         db.session.commit()
 
-    @app.before_request
-    def daily_trend_cleanup_fallback():
-        if request.path.startswith('/static/'):
-            return None
-        try:
-            from .trend_cleanup import cleanup_due
-            cleanup_due(force=False)
-        except Exception:
-            db.session.rollback();app.logger.exception("Daily trend cleanup failed safely")
-        return None
+    # Retention cleanup is intentionally excluded from HTTP requests.
     @app.get("/BingSiteAuth.xml")
     def bing_site_auth():
         repository_root = os.path.dirname(app.root_path)
