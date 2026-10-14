@@ -1,1 +1,0 @@
-Native Android capability reports are stored on the authenticated Device UID. Tracking Safety shows controls only for capabilities reported by that phone. Unsupported mobile-only rows are hidden. GPS-based unexpected movement remains available. Physical power/tamper remains hidden for phone trackers.
