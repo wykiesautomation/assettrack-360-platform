@@ -1,0 +1,11 @@
+[2026-10-14 18:33:31,794] WARNING in review_runtime: MOBILE_REQUEST {"endpoint":"main.mobile_tracker_location","status":202,"reason":"accepted","ms":116.3,"point_reasons":[]}
+[2026-10-14 18:33:31,874] WARNING in review_runtime: MOBILE_REQUEST {"endpoint":"main.mobile_tracker_location_batch","status":202,"reason":"accepted","ms":78.2,"accepted_count":1,"duplicate_count":0,"rejected_count":0,"point_reasons":[]}
+[2026-10-14 18:33:31,936] WARNING in review_runtime: MOBILE_REQUEST {"endpoint":"main.mobile_tracker_location_batch","status":202,"reason":"accepted","ms":60.4,"accepted_count":0,"duplicate_count":1,"rejected_count":0,"point_reasons":[]}
+[2026-10-14 18:33:32,087] WARNING in review_runtime: MOBILE_REQUEST {"endpoint":"main.mobile_tracker_heartbeat","status":202,"reason":"accepted","ms":57.7,"point_reasons":[]}
+[2026-10-14 18:33:32,117] WARNING in review_runtime: MOBILE_REQUEST {"endpoint":"main.mobile_tracker_location","status":402,"reason":"subscription_inactive","ms":28.8,"point_reasons":[]}
+single 202 {'sequence': 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'status': 'accepted'}
+batch 202 {'accepted': ['yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy'], 'accepted_count': 1, 'asset_id': 1, 'device_uid': 'TEST-PHONE', 'duplicate_count': 0, 'duplicates': [], 'last_seen': '2026-10-14T18:33:31.828967+00:00', 'last_seen_updated': True, 'latest_location_at': '2026-10-14T18:33:31.676711+00:00', 'latest_location_sequence': 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'rejected': [], 'rejected_count': 0, 'server_time': '2026-10-14T18:33:31.874291+00:00', 'status': 'processed', 'stored': True}
+map 200
+heartbeat 202
+PASS: single and batch GPS -> database -> Safety Twin; long sequences; duplicate; subscription denial; heartbeat; zero-data confidence; safe logs
+PASS dashboard query growth: 10 -> 10 with 20 additional assets

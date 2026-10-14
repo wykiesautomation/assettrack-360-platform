@@ -1,0 +1,8 @@
+{
+  "compile": "PASS",
+  "build_validated_trips_endpoint": "CONFIRMED_STOP_LOCK",
+  "orange_marker_uses_trip_end": true,
+  "cyan_route_not_extended": true,
+  "possible_address_uses_trip_end": true,
+  "hardcoded_address": false
+}
