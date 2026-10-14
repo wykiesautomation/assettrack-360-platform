@@ -24,7 +24,8 @@ def cleanup_due(force=False):
     locked=True;lock_connection=None
     if db.engine.dialect.name=='postgresql':
         lock_connection=db.engine.connect()
-        locked=bool(lock_connection.execute(text('SELECT pg_try_advisory_lock(:key)'),{'key':3602093}).scalar())
+        try:locked=bool(lock_connection.execute(text('SELECT pg_try_advisory_lock(:key)'),{'key':3602093}).scalar())
+        except Exception:lock_connection.close();raise
     if not locked:
         if lock_connection is not None:lock_connection.close()
         return {'ran':False,'readings':0,'locations':0}
@@ -34,7 +35,7 @@ def cleanup_due(force=False):
         for device in Device.query.all():
             policy=DeviceTrendPolicy.query.filter_by(device_id=device.id).first()
             trend_on=bool(policy and policy.trend_enabled);reading_days=policy.retention_days if policy else 93
-            gps_on=bool(policy.gps_history_enabled) if policy else str(device.device_type or '').upper() in {'MOBILE_WEB_TRACKER','ANDROID_MOBILE_TRACKER','MOBILE_TRACKER','IOS_MOBILE_TRACKER'};gps_days=policy.gps_retention_days if policy else 31
+            gps_on=bool(policy and policy.gps_history_enabled);gps_days=policy.gps_retention_days if policy else 31
             for sig in SignalDefinition.query.filter_by(asset_id=device.asset_id).all():
                 selected=SignalTrendPolicy.query.filter_by(device_id=device.id,signal_id=sig.id,enabled=True).first()
                 days=reading_days if trend_on and selected else 0
@@ -48,6 +49,5 @@ def cleanup_due(force=False):
         db.session.rollback();state=TrendCleanupState.query.filter_by(job_name=JOB_NAME).first() or TrendCleanupState(job_name=JOB_NAME);state.last_error=f'{type(exc).__name__}: cleanup failed';db.session.add(state);db.session.commit();raise
     finally:
         if lock_connection is not None:
-            try:
-                lock_connection.execute(text('SELECT pg_advisory_unlock(:key)'),{'key':3602093});lock_connection.commit()
+            try:lock_connection.execute(text('SELECT pg_advisory_unlock(:key)'),{'key':3602093});lock_connection.commit()
             finally:lock_connection.close()

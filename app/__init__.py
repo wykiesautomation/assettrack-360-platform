@@ -3,7 +3,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, g, jsonify, request, send_from_directory
 from flask_login import LoginManager, current_user
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import text
@@ -64,16 +64,8 @@ def ensure_device_firmware_schema(app):
     """Expand device firmware identity storage for full production build names."""
     if db.engine.dialect.name != "postgresql":
         return
-    inspector=db.inspect(db.engine)
-    firmware=next((c for c in inspector.get_columns('device') if c['name']=='firmware'),None)
-    sequence=next((c for c in inspector.get_columns('reading') if c['name']=='sequence'),None)
     with db.engine.begin() as connection:
-        if firmware and getattr(firmware['type'],'length',None) and firmware['type'].length<100:
-            connection.execute(text("ALTER TABLE device ALTER COLUMN firmware TYPE VARCHAR(100)"))
-        # A mobile sequence can be 80 characters plus a point suffix. The old
-        # VARCHAR(80) rolled back the complete location batch on PostgreSQL.
-        if sequence and getattr(sequence['type'],'length',None) and sequence['type'].length<160:
-            connection.execute(text("ALTER TABLE reading ALTER COLUMN sequence TYPE VARCHAR(160)"))
+        connection.execute(text("ALTER TABLE device ALTER COLUMN firmware TYPE VARCHAR(100)"))
 
 def ensure_email_verification_schema(app):
     """Add verification fields safely for existing production databases."""
@@ -166,7 +158,14 @@ def create_app(test_config=None):
 
     @login_manager.user_loader
     def load_user(user_id):
-        return db.session.get(User, int(user_id))
+        from sqlalchemy.orm import joinedload
+        try: uid=int(user_id)
+        except (TypeError,ValueError): return None
+        row=(db.session.query(User,Subscription).outerjoin(Subscription,Subscription.customer_id==User.customer_id)
+             .options(joinedload(User.customer)).filter(User.id==uid).first())
+        if not row:return None
+        g.site_subscription_rows={row[0].customer_id:row[1]}
+        return row[0]
 
     @app.after_request
     def prevent_authenticated_page_caching(response):
@@ -195,7 +194,7 @@ def create_app(test_config=None):
     with app.app_context():
         from . import edge_models  # Registers REV20A tables before create_all.
         initialise_schema_safely(app)
-        # Retention runs outside the web request path (see maintenance.py).
+        # Retention is scheduled outside startup and page requests below.
 
         email = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
         password = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "")
@@ -271,25 +270,8 @@ def create_app(test_config=None):
                 )
         db.session.commit()
 
-    from .maintenance import schedule_cleanup
-    @app.before_request
-    def daily_trend_cleanup_fallback():
-        if not request.path.startswith('/static/'):
-            schedule_cleanup(app)
-        return None
-    @app.before_request
-    def start_request_timer():
-        from flask import g
-        g.request_started=time.monotonic()
-    @app.after_request
-    def report_request_duration(response):
-        from flask import g
-        started=getattr(g,'request_started',None)
-        if started is not None:
-            elapsed=(time.monotonic()-started)*1000
-            response.headers['Server-Timing']=f'app;dur={elapsed:.1f}'
-            if elapsed>=1000:app.logger.warning('Slow request method=%s path=%s status=%s duration_ms=%.0f',request.method,request.path,response.status_code,elapsed)
-        return response
+    from .site_performance import install_performance_hooks
+    install_performance_hooks(app, db)
     @app.get("/BingSiteAuth.xml")
     def bing_site_auth():
         repository_root = os.path.dirname(app.root_path)

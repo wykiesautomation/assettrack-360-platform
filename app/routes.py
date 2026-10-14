@@ -14,13 +14,13 @@ from .route_intelligence import match_route, reverse_geocode, route_quality
 from .security_privacy import POLICY_VERSION,audit,consent_for_device,settings_for,evaluate_mobile,FEATURE_KEYS,MANDATORY_CONTROLS,fleet_defaults_for,entitlement_map,effective_features
 from .seo import SEO_PAGES, render_seo_page
 from .device_profiles import get_profile, public_profiles, profile_for_device
-from .tracking_validator import validate_movement_segments
 bp=Blueprint('main',__name__)
 _calibration_schema_ready=False
 
 @bp.before_app_request
 def ensure_calibration_schema():
     global _calibration_schema_ready
+    if request.path.startswith("/static/"):return None
     if _calibration_schema_ready:return None
     if db.engine.dialect.name != "postgresql":
         _calibration_schema_ready=True
@@ -73,16 +73,14 @@ def ensure_mobile_auto_profile(device):
     if not device or not device.asset_id or str(device.device_type or '').upper() not in ('MOBILE_WEB_TRACKER','ANDROID_MOBILE_TRACKER','MOBILE_TRACKER','IOS_MOBILE_TRACKER'):
         return []
     created=[]
-    signals={x.key:x for x in SignalDefinition.query.filter_by(customer_id=device.customer_id,asset_id=device.asset_id).all()}
-    assignments={x.channel_key:x for x in DeviceChannelAssignment.query.filter_by(customer_id=device.customer_id,device_id=device.id).all()}
     for point in MOBILE_AUTO_POINTS:
-        sig=signals.get(point['key'])
+        sig=SignalDefinition.query.filter_by(customer_id=device.customer_id,asset_id=device.asset_id,key=point['key']).first()
         if not sig:
             sig=SignalDefinition(customer_id=device.customer_id,asset_id=device.asset_id,key=point['key'],label=point['label'],signal_type=point['signal_type'],source_type='MOBILE',unit=point['unit'],widget=point['widget'],enabled=True,calibration_mode='PASSTHROUGH',config_json={'mobile_auto_managed':True,'optional':not point['required']})
             db.session.add(sig);db.session.flush();created.append(point['key'])
         else:
             sig.enabled=True;sig.source_type='MOBILE';cfg=dict(sig.config_json or {});cfg.update({'mobile_auto_managed':True,'optional':not point['required']});sig.config_json=cfg
-        row=assignments.get(point['key'])
+        row=DeviceChannelAssignment.query.filter_by(customer_id=device.customer_id,device_id=device.id,channel_key=point['key']).first()
         if not row:
             row=DeviceChannelAssignment(customer_id=device.customer_id,device_id=device.id,channel_key=point['key'],direction='LOCATION' if point['key']=='gps_location' else 'HEALTH')
             db.session.add(row)
@@ -197,10 +195,8 @@ def retain_latest_location_only(asset_id):
     if latest:Location.query.filter(Location.asset_id==asset_id,Location.id!=latest.id).delete(synchronize_session=False)
 
 def latest_reading(signal_id):
-    if hasattr(g,"dashboard_readings"):return g.dashboard_readings.get(signal_id)
     return Reading.query.filter_by(signal_id=signal_id).order_by(desc(Reading.sampled_at)).first()
 def active_device_for(asset):
-    if hasattr(g,"dashboard_devices"):return g.dashboard_devices.get(asset.id)
     return Device.query.filter_by(customer_id=asset.customer_id,asset_id=asset.id,active=True).first()
 
 def device_connectivity_state(device, reference_time=None):
@@ -235,7 +231,7 @@ def asset_status(asset):
         return 'UNASSIGNED' if not device else 'NEVER_SEEN'
     if connectivity!='ONLINE':
         return connectivity
-    open_alarm=g.dashboard_alarms.get(asset.id) if hasattr(g,'dashboard_alarms') else Alarm.query.filter_by(customer_id=asset.customer_id,asset_id=asset.id,state='OPEN').order_by(desc(Alarm.severity)).first()
+    open_alarm=Alarm.query.filter_by(customer_id=asset.customer_id,asset_id=asset.id,state='OPEN').order_by(desc(Alarm.severity)).first()
     return open_alarm.severity if open_alarm else 'ONLINE'
 
 BOARD_TELEMETRY_SPECS={
@@ -420,12 +416,18 @@ def reconcile_customer_payment(customer_id):
     return sub
 
 def entitlement_for(customer_id):
-    sub=Subscription.query.filter_by(customer_id=customer_id).first()
+    cached=getattr(g,'site_entitlements',{})
+    if customer_id in cached:return cached[customer_id]
+    preloaded=getattr(g,'site_subscription_rows',{})
+    sub=preloaded[customer_id] if customer_id in preloaded else Subscription.query.filter_by(customer_id=customer_id).first()
     if not sub:return False,None
     if sub.state not in ('ACTIVE','GRACE_PERIOD') or getattr(sub,'access_source',None)!='PAID':
         reconciled=reconcile_customer_payment(customer_id)
         if reconciled:sub=reconciled
-    refresh_subscription(sub);return sub.state in ('TRIAL','ACTIVE','GRACE_PERIOD'),sub
+    refresh_subscription(sub)
+    result=(sub.state in ('TRIAL','ACTIVE','GRACE_PERIOD'),sub)
+    cached[customer_id]=result;g.site_entitlements=cached
+    return result
 
 @bp.before_app_request
 def enforce_subscription_access():
@@ -800,36 +802,17 @@ def dashboard():
     assets=Asset.query.filter_by(customer_id=tenant_id()).order_by(Asset.name).all()
     sites=Site.query.filter_by(customer_id=tenant_id()).order_by(Site.name).all()
     devices=Device.query.filter_by(customer_id=tenant_id(),active=True).all()
-    # One request-scoped snapshot, tenant filtered. No cross-customer cache.
-    from sqlalchemy import func
-    asset_ids=[a.id for a in assets]
-    g.dashboard_devices={}
-    for d in sorted(devices,key=lambda x:x.id):g.dashboard_devices.setdefault(d.asset_id,d)
-    signal_rows=SignalDefinition.query.filter(SignalDefinition.customer_id==tenant_id(),SignalDefinition.asset_id.in_(asset_ids),SignalDefinition.enabled.is_(True)).all() if asset_ids else []
-    signal_ids=[x.id for x in signal_rows]
-    signals_by_asset={}
-    for sig in signal_rows:signals_by_asset.setdefault(sig.asset_id,[]).append(sig)
-    g.dashboard_readings={}
-    if signal_ids:
-        ranked=db.session.query(Reading.id.label('rid'),func.row_number().over(partition_by=Reading.signal_id,order_by=(Reading.sampled_at.desc(),Reading.id.desc())).label('rn')).filter(Reading.customer_id==tenant_id(),Reading.signal_id.in_(signal_ids)).subquery()
-        for row in Reading.query.join(ranked,Reading.id==ranked.c.rid).filter(ranked.c.rn==1).all():g.dashboard_readings[row.signal_id]=row
-    locations={}
-    if asset_ids:
-        ranked=db.session.query(Location.id.label('lid'),func.row_number().over(partition_by=Location.asset_id,order_by=(Location.sampled_at.desc(),Location.id.desc())).label('rn')).filter(Location.customer_id==tenant_id(),Location.asset_id.in_(asset_ids)).subquery()
-        for row in Location.query.join(ranked,Location.id==ranked.c.lid).filter(ranked.c.rn==1).all():locations[row.asset_id]=row
-    g.dashboard_alarms={}
-    for alarm in Alarm.query.filter_by(customer_id=tenant_id(),state='OPEN').order_by(desc(Alarm.severity)).all():g.dashboard_alarms.setdefault(alarm.asset_id,alarm)
     now=utcnow(); counts={'HEALTHY':0,'WARNING':0,'CRITICAL':0,'OFFLINE':0,'UNASSIGNED':0}; cards=[]; attention=[]; mapped=[]
     tank_capacity=tank_volume=0.0; tank_count=low_count=0
     for asset in assets:
-        status=asset_status(asset);asset.status=status;count_key='HEALTHY' if status=='ONLINE' else status;counts[count_key]=counts.get(count_key,0)+1
+        status=asset_status(asset);asset.status=status;counts[status]=counts.get(status,0)+1
         device=active_device_for(asset)
-        sigs={x.key:latest_reading(x.id) for x in signals_by_asset.get(asset.id,[])}
+        sigs={x.key:latest_reading(x.id) for x in SignalDefinition.query.filter_by(asset_id=asset.id,enabled=True)}
         l1,v1,l2,v2='STATUS',status,'LAST CONTACT','No data'
         if asset.asset_type=='TANK':
             level=sigs.get('level_percent');volume=sigs.get('volume_l');l1='LEVEL';v1=f'{level.value:.1f}%' if level else 'Waiting';l2='VOLUME';v2=f'{volume.value:,.0f} {asset.capacity_unit or "L"}' if volume else 'Waiting';tank_count+=1;tank_capacity+=float(asset.capacity or 0);tank_volume+=float(volume.value if volume else 0);low_count+=1 if level and level.value<=20 else 0
         elif asset.asset_type=='TRACKER':
-            loc=locations.get(asset.id);l1='MOVEMENT';v1=f'{loc.speed_kmh or 0:.0f} km/h' if loc else 'No position';l2='POSITION';v2=f'{loc.latitude:.4f}, {loc.longitude:.4f}' if loc else 'Waiting'
+            loc=Location.query.filter_by(customer_id=tenant_id(),asset_id=asset.id).order_by(desc(Location.sampled_at)).first();l1='MOVEMENT';v1=f'{loc.speed_kmh or 0:.0f} km/h' if loc else 'No position';l2='POSITION';v2=f'{loc.latitude:.4f}, {loc.longitude:.4f}' if loc else 'Waiting'
         elif asset.asset_type=='VIBRATION':
             vib=sigs.get('vibration_rms');temp=sigs.get('temperature_c');l1lk=''
             l1='VIBRATION';v1=f'{vib.value:.2f} mm/s' if vib else 'Waiting';l2='TEMPERATURE';v2=f'{temp.value:.1f} °C' if temp else 'Waiting'
@@ -838,21 +821,21 @@ def dashboard():
         battery_reading=sigs.get('battery_percent') or sigs.get('battery_v')
         battery_text='Not reported';battery_state='UNKNOWN'
         if battery_reading:
-            if battery_reading.unit=='%' or battery_reading.signal_id==getattr(next((x for x in signals_by_asset.get(asset.id,[]) if x.key=='battery_percent'),None),'id',None):
+            if battery_reading.unit=='%' or battery_reading.signal_id==getattr(next((x for x in SignalDefinition.query.filter_by(asset_id=asset.id) if x.key=='battery_percent'),None),'id',None):
                 battery_value=max(0,min(100,float(battery_reading.value)));battery_text=f'{battery_value:.0f}%';battery_state='CRITICAL' if battery_value<=10 else 'LOW' if battery_value<=25 else 'GOOD'
             else:
                 battery_text=f'{float(battery_reading.value):.2f} {battery_reading.unit or "V"}';battery_state='REPORTED'
         last_address='No location received yet'
-        loc_for_summary=locations.get(asset.id)
+        loc_for_summary=Location.query.filter_by(customer_id=tenant_id(),asset_id=asset.id).order_by(desc(Location.sampled_at)).first()
         if loc_for_summary:
             geo=reverse_geocode(loc_for_summary.latitude,loc_for_summary.longitude,accuracy_m=loc_for_summary.accuracy_m or 0,cache_only=True)
             last_address=geo.get('possible_address') or f'{loc_for_summary.latitude:.5f}, {loc_for_summary.longitude:.5f}'
         seen='No telemetry'
-        if device and device.last_seen:
-            mins=max(0,int((now-aware(device.last_seen)).total_seconds()//60));seen='Just now' if mins<1 else f'{mins} min ago' if mins<60 else f'{mins//60} h ago'
+        if asset.last_seen:
+            mins=max(0,int((now-aware(asset.last_seen)).total_seconds()//60));seen='Just now' if mins<1 else f'{mins} min ago' if mins<60 else f'{mins//60} h ago'
         cards.append({'asset':asset,'status':status,'metric_1_label':l1,'metric_1_value':v1,'metric_2_label':l2,'metric_2_value':v2,'device_type':device.device_type if device else 'No device assigned','last_seen':seen,'battery_text':battery_text,'battery_state':battery_state,'last_address':last_address})
         if status in ('CRITICAL','WARNING','OFFLINE'):attention.append({'asset':asset,'status':status,'message':'Communication timeout' if status=='OFFLINE' else 'Active condition requires review'})
-        loc=locations.get(asset.id)
+        loc=Location.query.filter_by(customer_id=tenant_id(),asset_id=asset.id).order_by(desc(Location.sampled_at)).first()
         device_fresh=bool(device and device_connectivity_state(device,now)=='ONLINE')
         if loc and device_fresh:mapped.append({'id':asset.id,'name':asset.name,'type':asset.asset_type,'status':status,'lat':loc.latitude,'lon':loc.longitude})
     order={'CRITICAL':0,'WARNING':1,'OFFLINE':2};attention.sort(key=lambda x:order.get(x['status'],9))
@@ -1291,7 +1274,7 @@ def build_validated_trips(rows,speed_limit=60.0):
         try:
             sequence=str(getattr(row,'sequence','') or '')
             trip_id=sequence.split('|',1)[0] if sequence.startswith('trip-') and '|' in sequence else None
-            point={'latitude':float(row.latitude),'longitude':float(row.longitude),'accuracy':max(3.0,float(row.accuracy_m or 0)),'reported_speed':max(0.0,float(row.speed_kmh or 0)),'heading':float(getattr(row,'heading',0) or 0),'timestamp':aware(row.sampled_at).isoformat(),'trip_id':trip_id}
+            point={'latitude':float(row.latitude),'longitude':float(row.longitude),'accuracy':max(3.0,float(row.accuracy_m or 0)),'reported_speed':max(0.0,float(row.speed_kmh or 0)),'timestamp':aware(row.sampled_at).isoformat(),'trip_id':trip_id}
         except (TypeError,ValueError):
             rejected.append({'reason':'INVALID_PAYLOAD'});continue
         if not(-90<=point['latitude']<=90 and -180<=point['longitude']<=180) or (abs(point['latitude'])<.000001 and abs(point['longitude'])<.000001):
@@ -1341,14 +1324,45 @@ def build_validated_trips(rows,speed_limit=60.0):
                 'overspeed_episodes':[],'start':anchor,'end':anchor,'stationary':True})
             continue
 
-        validation=validate_movement_segments(chain)
-        accepted_edges=validation['accepted_edges']
-        route_segments=validation['segments']
-        rejected.extend(validation['rejected'])
-        total=sum(edge['km'] for edge in accepted_edges)
-        moving_seconds=sum(edge['seconds'] for edge in accepted_edges)
+        # Candidate movement edges must clear the combined accuracy envelope,
+        # cover at least 25 m and produce a plausible measured speed.
+        edges=[]
+        for i,(a,b) in enumerate(zip(chain,chain[1:])):
+            dt=(datetime.fromisoformat(b['timestamp'])-datetime.fromisoformat(a['timestamp'])).total_seconds()
+            km=_distance_dict(a,b);metres=km*1000;derived=km/(dt/3600) if dt>0 else 9999
+            threshold=max(25.0,min(120.0,(a['accuracy']+b['accuracy'])*1.25))
+            candidate=0<dt<=900 and metres>threshold and 1.0<=derived<=160.0
+            edges.append({'i':i,'candidate':candidate,'km':km,'speed':derived,'seconds':dt})
+
+        # Strict continuity: an isolated displacement is never enough, even when
+        # it is large. Movement requires at least two consecutive plausible edges.
+        # This prevents straight cyan shortcuts across missing or rejected GPS data.
+        accepted_edges=[]
+        for i,edge in enumerate(edges):
+            if not edge['candidate']:continue
+            adjacent=(i>0 and edges[i-1]['candidate']) or (i+1<len(edges) and edges[i+1]['candidate'])
+            if adjacent:accepted_edges.append(edge)
+            else:rejected.append({'reason':'ISOLATED_MOVEMENT','timestamp':chain[i+1]['timestamp']})
+
+        total=sum(x['km'] for x in accepted_edges)
+        moving_seconds=sum(x['seconds'] for x in accepted_edges)
         explicit=bool(chain[0].get('trip_id'))
         if not explicit and (total<0.10 or moving_seconds<20):continue
+
+        # Preserve separate contiguous runs. Never flatten disconnected runs into
+        # one polyline because that invents a diagonal line across the evidence gap.
+        route_segments=[];edge_run=[]
+        for edge in accepted_edges:
+            if edge_run and edge['i']!=edge_run[-1]['i']+1:
+                indices={edge_run[0]['i']}
+                for item in edge_run:indices.update((item['i'],item['i']+1))
+                route_segments.append([chain[index] for index in sorted(indices)])
+                edge_run=[]
+            edge_run.append(edge)
+        if edge_run:
+            indices={edge_run[0]['i']}
+            for item in edge_run:indices.update((item['i'],item['i']+1))
+            route_segments.append([chain[index] for index in sorted(indices)])
         route=[point for segment in route_segments for point in segment] if route_segments else [chain[0]]
         validated_speeds=[x['speed'] for x in accepted_edges]
         maximum=max(validated_speeds or [0.0])
@@ -2599,7 +2613,7 @@ def mobile_tracker_status():
     if not device:return jsonify(error='invalid_mobile_tracker_token'),401
     latest=Location.query.filter_by(customer_id=device.customer_id,asset_id=device.asset_id).order_by(desc(Location.sampled_at)).first()
     age_seconds=max(0,int((utcnow()-aware(device.last_seen)).total_seconds())) if device.last_seen else None
-    live_state=device_connectivity_state(device)
+    live_state='ONLINE' if age_seconds is not None and age_seconds<=300 else 'DELAYED' if age_seconds is not None and age_seconds<=900 else 'OFFLINE'
     return jsonify(status='ok',tracking_state=live_state,age_seconds=age_seconds,device_uid=device.device_uid,asset_name=device.asset.name,last_contact=device.last_seen.isoformat() if device.last_seen else None,last_position={'latitude':latest.latitude,'longitude':latest.longitude,'sampled_at':latest.sampled_at.isoformat(),'accuracy_m':latest.accuracy_m} if latest else None)
 
 @bp.get('/api/v1/mobile/config')
@@ -2862,7 +2876,14 @@ def alert_settings(asset_id):
 @bp.route('/notifications/email',methods=['GET','POST'])
 @login_required
 def notifications_email():
-    profile=WorkspaceProfile.query.filter_by(customer_id=tenant_id()).first()
+    if request.method=='GET':
+        # Outer join from Customer preserves workspaces without saved settings.
+        row=(db.session.query(WorkspaceProfile,FleetFeatureDefaults)
+             .select_from(Customer).outerjoin(WorkspaceProfile,WorkspaceProfile.customer_id==Customer.id)
+             .outerjoin(FleetFeatureDefaults,FleetFeatureDefaults.customer_id==Customer.id)
+             .filter(Customer.id==tenant_id()).first())
+        profile,defaults=row if row else (None,None)
+    else:profile=WorkspaceProfile.query.filter_by(customer_id=tenant_id()).first()
     if request.method=='POST':
         email=(request.form.get('contact_email') or current_user.email).strip().lower()
         if '@' not in email:flash('Enter a valid email address.','error');return redirect(url_for('main.notifications_email'))
@@ -2872,7 +2893,6 @@ def notifications_email():
         if not defaults:defaults=FleetFeatureDefaults(customer_id=tenant_id());db.session.add(defaults)
         defaults.email_notifications_enabled=request.form.get('enabled')=='on';defaults.updated_by=current_user.id;db.session.commit();flash('Email notification settings saved.','ok');return redirect(url_for('main.notifications_email'))
     logs=EmailNotificationLog.query.filter_by(customer_id=tenant_id()).order_by(EmailNotificationLog.created_at.desc()).limit(50).all()
-    defaults=FleetFeatureDefaults.query.filter_by(customer_id=tenant_id()).first()
     return render_template('email_notifications.html',profile=profile,logs=logs,defaults=defaults)
 
 @bp.post('/notifications/email/test')

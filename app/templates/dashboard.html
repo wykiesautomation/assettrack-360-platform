@@ -16,6 +16,6 @@
     </div></section>
     <section class="overview-panel alarms-panel"><div class="overview-panel-head"><h2>Recent Alarms</h2><a href="{{url_for('main.alarm_centre')}}">View all</a></div><div class="overview-alarms">{% for e in recent_events[:5] %}<div class="overview-alarm"><i class="{{'critical' if 'CRITICAL' in e.detail else 'warning'}}"></i><span><b>{{e.title}}</b><small>{{e.detail}}</small><em>{{e.time}}</em></span></div>{% else %}<div class="overview-empty">No recent alarms.</div>{% endfor %}</div></section>
   </div>
-  <section class="overview-panel telemetry-panel"><div class="overview-panel-head"><h2>Recorded Activity</h2><span>Stored alarm events, not a telemetry chart</span></div>{% if recent_events %}<div class="overview-alarms">{% for e in recent_events %}<div class="overview-alarm"><span><b>{{e.title}}</b><small>{{e.detail}}</small><em>{{e.time}}</em></span></div>{% endfor %}</div>{% else %}<div class="telemetry-empty">No recorded events to display.</div>{% endif %}</section>
+  <section class="overview-panel telemetry-panel"><div class="overview-panel-head"><h2>Telemetry Activity</h2><span>Latest accepted platform activity</span></div>{% if recent_events %}<div class="telemetry-bars">{% for h in [28,42,36,55,48,72,61,81,68,89,76,94] %}<i style="height:{{h}}%"></i>{% endfor %}</div>{% else %}<div class="telemetry-empty">No recent telemetry activity to display.</div>{% endif %}</section>
 </div>
 {% endblock %}

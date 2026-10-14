@@ -77,7 +77,7 @@ class Reading(db.Model):
     asset_id=db.Column(db.Integer,nullable=False,index=True); signal_id=db.Column(db.Integer,nullable=False,index=True)
     sampled_at=db.Column(db.DateTime(timezone=True),nullable=False,index=True); received_at=db.Column(db.DateTime(timezone=True),default=now,nullable=False)
     value=db.Column(db.Float,nullable=False); raw_value=db.Column(db.Float); unit=db.Column(db.String(20)); quality=db.Column(db.String(20),default='GOOD')
-    sequence=db.Column(db.String(160)); __table_args__=(db.UniqueConstraint('signal_id','sequence',name='uq_signal_sequence'),)
+    sequence=db.Column(db.String(80)); __table_args__=(db.UniqueConstraint('signal_id','sequence',name='uq_signal_sequence'),)
 
 class Alarm(db.Model):
     id=db.Column(db.Integer,primary_key=True); customer_id=db.Column(db.Integer,nullable=False,index=True); asset_id=db.Column(db.Integer,nullable=False,index=True)
