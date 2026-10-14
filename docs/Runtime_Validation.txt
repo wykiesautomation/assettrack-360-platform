@@ -1,0 +1,51 @@
+PASS /dashboard renders
+PASS /dashboard timing header
+PASS /dashboard script 0 syntax
+PASS /asset/1 renders
+PASS /asset/1 timing header
+PASS /asset/1 script 0 syntax
+PASS /asset/1 script 1 syntax
+PASS /asset/1 script 2 syntax
+PASS /asset/1 script 3 syntax
+PASS heartbeat accepted
+PASS heartbeat makes device ONLINE
+batch response 202 {'accepted': ['xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'], 'accepted_count': 1, 'asset_id': 1, 'device_uid': 'TEST-TRACKER', 'duplicate_count': 0, 'duplicates': [], 'last_seen': '2026-10-14T04:45:19.535076+00:00', 'last_seen_updated': True, 'latest_location_at': '2026-10-14T04:45:19.470324+00:00', 'latest_location_sequence': 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'rejected': [], 'rejected_count': 0, 'server_time': '2026-10-14T04:45:19.670244+00:00', 'status': 'processed', 'stored': True}
+PASS location batch accepted
+PASS duplicate batch idempotent
+PASS invalid token rejected
+PASS wrong device identity rejected
+PASS reading sequence accommodates suffix
+PASS location actually persisted
+PASS stale contact remains OFFLINE
+PASS static response
+PASS static no database queries
+PASS dashboard tenant isolation
+PASS asset tenant isolation
+{
+  "passed": 22,
+  "checks": [
+    "/dashboard renders",
+    "/dashboard timing header",
+    "/dashboard script 0 syntax",
+    "/asset/1 renders",
+    "/asset/1 timing header",
+    "/asset/1 script 0 syntax",
+    "/asset/1 script 1 syntax",
+    "/asset/1 script 2 syntax",
+    "/asset/1 script 3 syntax",
+    "heartbeat accepted",
+    "heartbeat makes device ONLINE",
+    "location batch accepted",
+    "duplicate batch idempotent",
+    "invalid token rejected",
+    "wrong device identity rejected",
+    "reading sequence accommodates suffix",
+    "location actually persisted",
+    "stale contact remains OFFLINE",
+    "static response",
+    "static no database queries",
+    "dashboard tenant isolation",
+    "asset tenant isolation"
+  ],
+  "limits": "Synthetic SQLite fixtures; production PostgreSQL and real phone delivery not tested."
+}
