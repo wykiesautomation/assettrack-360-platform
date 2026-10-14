@@ -10,7 +10,9 @@ motion_bp=Blueprint('motion_safety',__name__)
 def now():return datetime.now(timezone.utc)
 def aware(v):return v if not v or v.tzinfo else v.replace(tzinfo=timezone.utc)
 def bearer():return request.headers.get('Authorization','').removeprefix('Bearer ').strip()
-def device_auth():return Device.query.filter_by(api_token=bearer(),active=True).first() if bearer() else None
+def device_auth():
+ from .mobile_request_logging import remember_device
+ return remember_device(Device.query.filter_by(api_token=bearer(),active=True).first() if bearer() else None)
 class MotionSafetySample(db.Model):
  __tablename__='motion_safety_sample';id=db.Column(db.BigInteger,primary_key=True);customer_id=db.Column(db.Integer,nullable=False,index=True);asset_id=db.Column(db.Integer,nullable=False,index=True);device_id=db.Column(db.Integer,nullable=False,index=True);sampled_at=db.Column(db.DateTime(timezone=True),nullable=False,index=True);dynamic_acceleration_ms2=db.Column(db.Float);roll_deg=db.Column(db.Float);pitch_deg=db.Column(db.Float);speed_kmh=db.Column(db.Float);accuracy_m=db.Column(db.Float);sequence=db.Column(db.String(140),nullable=False,unique=True,index=True)
 class MobileRateBucket(db.Model):

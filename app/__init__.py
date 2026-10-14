@@ -272,6 +272,8 @@ def create_app(test_config=None):
 
     from .site_performance import install_performance_hooks
     install_performance_hooks(app, db)
+    from .mobile_request_logging import install_mobile_logging
+    install_mobile_logging(app, db)
     @app.get("/BingSiteAuth.xml")
     def bing_site_auth():
         repository_root = os.path.dirname(app.root_path)

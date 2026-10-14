@@ -176,7 +176,8 @@ MOBILE_TRACKER_DEVICE_TYPES=('MOBILE_WEB_TRACKER','ANDROID_MOBILE_TRACKER','IOS_
 def mobile_tracker_device():
     token=request.headers.get('Authorization','').removeprefix('Bearer ').strip()
     if not token:return None
-    return Device.query.filter(Device.api_token==token,Device.active.is_(True),Device.device_type.in_(MOBILE_TRACKER_DEVICE_TYPES)).first()
+    from .mobile_request_logging import remember_device
+    return remember_device(Device.query.filter(Device.api_token==token,Device.active.is_(True),Device.device_type.in_(MOBILE_TRACKER_DEVICE_TYPES)).first())
 def trend_policy_for(device):
     if not device:return None
     policy=DeviceTrendPolicy.query.filter_by(customer_id=device.customer_id,device_id=device.id).first()
