@@ -1,70 +1,31 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<title>Wykies Automation | Industrial Software, SCADA & Automation Solutions</title>
 
-  <url>
-    <loc>https://assettrack360.wykiesautomation.co.za/</loc>
-    <changefreq>daily</changefreq>
-    <priority>1.0</priority>
-  </url>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 
-  <url>
-    <loc>https://assettrack360.wykiesautomation.co.za/login</loc>
-    <changefreq>weekly</changefreq>
-    <priority>0.8</priority>
-  </url>
+<meta name="description" content="Industrial software, SCADA platforms, fleet tracking, OPC connectivity and automation solutions from Wykies Automation.">
 
-  <url>
-    <loc>https://assettrack360.wykiesautomation.co.za/register</loc>
-    <changefreq>weekly</changefreq>
-    <priority>0.8</priority>
-  </url>
+<meta name="keywords" content="industrial software, SCADA, OPC UA, OPC connectivity, fleet tracking, asset monitoring, industrial automation, HMI, PlantLink, AssetTrack 360, VisionEdge, LoopPilot, South Africa">
 
-  <url>
-    <loc>https://assettrack360.wykiesautomation.co.za/fleet-tracking-south-africa</loc>
-    <changefreq>weekly</changefreq>
-    <priority>0.9</priority>
-  </url>
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1">
 
-  <url>
-    <loc>https://assettrack360.wykiesautomation.co.za/vehicle-gps-tracking</loc>
-    <changefreq>weekly</changefreq>
-    <priority>0.9</priority>
-  </url>
+<meta name="author" content="Wykies Automation">
 
-  <url>
-    <loc>https://assettrack360.wykiesautomation.co.za/mobile-phone-tracking</loc>
-    <changefreq>weekly</changefreq>
-    <priority>0.9</priority>
-  </url>
+<link rel="canonical" href="https://wykiesautomation.co.za/">
 
-  <url>
-    <loc>https://assettrack360.wykiesautomation.co.za/fleet-tracking-software</loc>
-    <changefreq>weekly</changefreq>
-    <priority>0.9</priority>
-  </url>
+<!-- Open Graph -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Wykies Automation">
+<meta property="og:title" content="Wykies Automation | Industrial Software, SCADA & Automation Solutions">
+<meta property="og:description" content="Industrial software, SCADA platforms, fleet tracking, OPC connectivity and automation solutions from Wykies Automation.">
+<meta property="og:url" content="https://wykiesautomation.co.za/">
+<meta property="og:image" content="https://wykiesautomation.co.za/assets/img/og-image.jpg">
 
-  <url>
-    <loc>https://assettrack360.wykiesautomation.co.za/asset-monitoring-software</loc>
-    <changefreq>weekly</changefreq>
-    <priority>0.9</priority>
-  </url>
+<!-- Twitter/X -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Wykies Automation">
+<meta name="twitter:description" content="Industrial software, SCADA platforms, fleet tracking, OPC connectivity and automation solutions.">
+<meta name="twitter:image" content="https://wykiesautomation.co.za/assets/img/og-image.jpg">
 
-  <url>
-    <loc>https://assettrack360.wykiesautomation.co.za/tank-monitoring</loc>
-    <changefreq>weekly</changefreq>
-    <priority>0.8</priority>
-  </url>
-
-  <url>
-    <loc>https://assettrack360.wykiesautomation.co.za/device-engineering</loc>
-    <changefreq>weekly</changefreq>
-    <priority>0.8</priority>
-  </url>
-
-  <url>
-    <loc>https://assettrack360.wykiesautomation.co.za/industrial-connectivity</loc>
-    <changefreq>weekly</changefreq>
-    <priority>0.8</priority>
-  </url>
-
-</urlset>
+<!-- Geo -->
+<meta name
