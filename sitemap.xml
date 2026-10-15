@@ -1,31 +1,16 @@
-<title>Wykies Automation | Industrial Software, SCADA & Automation Solutions</title>
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+  <url>
+    <loc>https://wykiesautomation.co.za/</loc>
+  </url>
 
-<meta name="description" content="Industrial software, SCADA platforms, fleet tracking, OPC connectivity and automation solutions from Wykies Automation.">
+  <url>
+    <loc>https://wykiesautomation.co.za/software</loc>
+  </url>
 
-<meta name="keywords" content="industrial software, SCADA, OPC UA, OPC connectivity, fleet tracking, asset monitoring, industrial automation, HMI, PlantLink, AssetTrack 360, VisionEdge, LoopPilot, South Africa">
+  <url>
+    <loc>https://wykiesautomation.co.za/marketplace</loc>
+  </url>
 
-<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1">
-
-<meta name="author" content="Wykies Automation">
-
-<link rel="canonical" href="https://wykiesautomation.co.za/">
-
-<!-- Open Graph -->
-<meta property="og:type" content="website">
-<meta property="og:site_name" content="Wykies Automation">
-<meta property="og:title" content="Wykies Automation | Industrial Software, SCADA & Automation Solutions">
-<meta property="og:description" content="Industrial software, SCADA platforms, fleet tracking, OPC connectivity and automation solutions from Wykies Automation.">
-<meta property="og:url" content="https://wykiesautomation.co.za/">
-<meta property="og:image" content="https://wykiesautomation.co.za/assets/img/og-image.jpg">
-
-<!-- Twitter/X -->
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Wykies Automation">
-<meta name="twitter:description" content="Industrial software, SCADA platforms, fleet tracking, OPC connectivity and automation solutions.">
-<meta name="twitter:image" content="https://wykiesautomation.co.za/assets/img/og-image.jpg">
-
-<!-- Geo -->
-<meta name
+</urlset>
