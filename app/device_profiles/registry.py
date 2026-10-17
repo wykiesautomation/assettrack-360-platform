@@ -11,25 +11,25 @@ from .schema import validate_profile
 
 
 MODULES = (
-    "esp32d_38pin",
-    "esp32_wroom32",
-    "sim808_samd21",
-    "lilygo_t_sim7000g",
-    "lilygo_t_sim7600e_v13",
+    'esp32d_38pin',
+    'esp32_wroom32',
+    'sim808_samd21',
+    'lilygo_t_sim7000g',
+    'lilygo_t_sim7600e_v13',
 )
 
 PUBLIC_BOARD_CODES = (
-    "AT360_ESP32D_EXPANDED",
-    "AT360_ESP32_WROOM32",
-    "AT360_SIM808_TRACKER_2AI_2DO",
-    "AT360_LILYGO_TSIM7000G",
-    "AT360_LILYGO_T_SIM7600E_V13",
+    'AT360_ESP32D_EXPANDED',
+    'AT360_ESP32_WROOM32',
+    'AT360_SIM808_TRACKER_2AI_2DO',
+    'AT360_LILYGO_TSIM7000G',
+    'AT360_LILYGO_T_SIM7600E_V13',
 )
 
 PROFILE_ALIASES = {
-    "AT360_ESP32D_38PIN": "AT360_ESP32D_EXPANDED",
-    "AT360_ESP32D_PILOT": "AT360_ESP32D_EXPANDED",
-    "AT360_LILYGO_T_SIM7000G": "AT360_LILYGO_TSIM7000G",
+    'AT360_ESP32D_38PIN': 'AT360_ESP32D_EXPANDED',
+    'AT360_ESP32D_PILOT': 'AT360_ESP32D_EXPANDED',
+    'AT360_LILYGO_T_SIM7000G': 'AT360_LILYGO_TSIM7000G',
 }
 
 
@@ -54,12 +54,15 @@ def get_profile(code):
 
 
 def public_profiles():
-    """Return only the three physical boards shown on Connect Device."""
-    return [
-        DEVICE_PROFILES[code]
-        for code in PUBLIC_BOARD_CODES
-        if code in DEVICE_PROFILES
-    ]
+    """Return every supported physical board exactly once."""
+    profiles=[]
+    seen=set()
+    for code in PUBLIC_BOARD_CODES:
+        profile=DEVICE_PROFILES.get(code)
+        if profile and profile['code'] not in seen:
+            profiles.append(profile)
+            seen.add(profile['code'])
+    return profiles
 
 
 def profile_for_device(device):
