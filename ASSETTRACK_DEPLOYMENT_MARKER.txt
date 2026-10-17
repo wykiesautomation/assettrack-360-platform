@@ -1,4 +1,4 @@
 ﻿AssetTrack 360 production upload
-UTC: 2026-10-17T20:17:46Z
+UTC: 2026-10-17T20:20:44Z
 Source ZIP: AssetTrack360_Duplicate_LILYGO_Cards_FIXED_REV1.zip
 Expected cards: LILYGO T-SIM7000G GNSS Tracker and LILYGO T-SIM7600E V1.3
