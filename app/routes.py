@@ -2483,7 +2483,8 @@ def hardware_device_claim():
         'AT360_ESP32_WROOM32':'AT360-WROOM32-',
         'AT360_ESP32D_EXPANDED':'AT360-ESP32D-',
         'AT360_SIM808_TRACKER_2AI_2DO':'AT360-SIM808-',
-        'AT360_LILYGO_T_SIM7000G':'AT360-TSIM7600E-',
+        'AT360_LILYGO_TSIM7000G':'AT360-LILYGO-',
+        'AT360_LILYGO_T_SIM7000G':'AT360-LILYGO-',
         'AT360_LILYGO_T_SIM7600E_V13':'AT360-TSIM7600E-',
     }
     prefix=uid_prefixes.get(str(expected_profile.get('code') or '').upper(),'AT360-BOARD-');final_uid=prefix+board_id

@@ -44,7 +44,7 @@ class Device(db.Model):
     def profile_code(self):
         for capability in (self.capabilities or []):
             if str(capability).startswith('PROFILE:'): return str(capability).split(':',1)[1]
-        return {'ESP32_REMOTE_IO':'AT360_ESP32D_PILOT','SIM808_GPS_TRACKER':'AT360_SIM808_TRACKER_2AI_2DO','SIM808_SAMD21':'AT360_SIM808_TRACKER_2AI_2DO','LILYGO_T_SIM7000G_TRACKER':'AT360_LILYGO_T_SIM7600E_V13','LILYGO_T_SIM7600E_V13_TRACKER':'AT360_LILYGO_T_SIM7600E_V13'}.get(self.device_type)
+        return {'ESP32_REMOTE_IO':'AT360_ESP32D_PILOT','SIM808_GPS_TRACKER':'AT360_SIM808_TRACKER_2AI_2DO','SIM808_SAMD21':'AT360_SIM808_TRACKER_2AI_2DO','LILYGO_T_SIM7000G_TRACKER':'AT360_LILYGO_TSIM7000G','LILYGO_T_SIM7600E_V13_TRACKER':'AT360_LILYGO_T_SIM7600E_V13'}.get(self.device_type)
 class MobileTrackerRegistration(db.Model):
     id=db.Column(db.Integer,primary_key=True)
     customer_id=db.Column(db.Integer,db.ForeignKey('customer.id'),nullable=False,index=True)

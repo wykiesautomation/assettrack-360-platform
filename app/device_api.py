@@ -53,14 +53,16 @@ def claim():
     if now()>reg.expires_at.replace(tzinfo=reg.expires_at.tzinfo or timezone.utc):
         reg.provisioning_state='EXPIRED';db.session.commit();return jsonify(error='claim_code_expired'),410
     profile=get_profile(reg.profile_code)
-    if not profile or str(d.get('profile_code','')).upper()!=profile['code']:return jsonify(error='profile_mismatch',expected=reg.profile_code),409
+    submitted_profile=get_profile(d.get('profile_code'))
+    if not profile or not submitted_profile or submitted_profile['code']!=profile['code']:return jsonify(error='profile_mismatch',expected=reg.profile_code),409
     if len(board)<6:return jsonify(error='invalid_board_id'),400
     profile_code=str(profile.get('code') or '').upper()
     uid_prefixes={
         'AT360_ESP32_WROOM32':'AT360-WROOM32-',
         'AT360_ESP32D_EXPANDED':'AT360-ESP32D-',
         'AT360_SIM808_TRACKER_2AI_2DO':'AT360-SIM808-',
-        'AT360_LILYGO_T_SIM7000G':'AT360-TSIM7600E-',
+        'AT360_LILYGO_TSIM7000G':'AT360-LILYGO-',
+        'AT360_LILYGO_T_SIM7000G':'AT360-LILYGO-',
         'AT360_LILYGO_T_SIM7600E_V13':'AT360-TSIM7600E-',
     }
     prefix=uid_prefixes.get(profile_code,'AT360-BOARD-')
@@ -181,8 +183,18 @@ def telemetry():
     dev=auth_device()
     if not dev:return jsonify(error='unauthorized'),401
     p=profile_for_device(dev);allowed={x['key'] for x in p.get('channels',[])};data=request.get_json(silent=True) or {};seq=str(data.get('sequence','')).strip()
+    if not seq and p and p.get('code')=='AT360_LILYGO_TSIM7000G':
+        seq=str(data.get('source_utc') or f'lilygo:{int(now().timestamp())}').strip()[:80]
     if not seq:return jsonify(error='sequence_required'),400
     stored=[];rejected=[]
+    if p and p.get('code')=='AT360_LILYGO_TSIM7000G' and data.get('gnss_valid') is True and dev.asset_id:
+        try:
+            latitude=float(data.get('latitude'));longitude=float(data.get('longitude'));accuracy=float(data.get('accuracy_m') or 0);speed=max(0.0,float(data.get('speed_kmh') or 0))
+            if -90<=latitude<=90 and -180<=longitude<=180 and not (latitude==0 and longitude==0) and 0<=accuracy<=100:
+                if not Location.query.filter_by(asset_id=dev.asset_id,sequence=seq).first():
+                    db.session.add(Location(customer_id=dev.customer_id,asset_id=dev.asset_id,sampled_at=now(),latitude=latitude,longitude=longitude,speed_kmh=speed,accuracy_m=accuracy,sequence=seq));stored.append('gps_location')
+            else:rejected.append('gps_location')
+        except (TypeError,ValueError):rejected.append('gps_location')
     for item in data.get('measurements',[]):
         key=str(item.get('point','')).strip();assignment=DeviceChannelAssignment.query.filter_by(device_id=dev.id,channel_key=key,enabled=True).first()
         if key not in allowed or not assignment or not assignment.signal_id:rejected.append(key);continue

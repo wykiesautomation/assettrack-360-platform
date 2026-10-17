@@ -14,6 +14,7 @@ MODULES = (
     "esp32d_38pin",
     "esp32_wroom32",
     "sim808_samd21",
+    "lilygo_t_sim7000g",
     "lilygo_t_sim7600e_v13",
 )
 
@@ -21,13 +22,14 @@ PUBLIC_BOARD_CODES = (
     "AT360_ESP32D_EXPANDED",
     "AT360_ESP32_WROOM32",
     "AT360_SIM808_TRACKER_2AI_2DO",
+    "AT360_LILYGO_TSIM7000G",
     "AT360_LILYGO_T_SIM7600E_V13",
 )
 
 PROFILE_ALIASES = {
     "AT360_ESP32D_38PIN": "AT360_ESP32D_EXPANDED",
     "AT360_ESP32D_PILOT": "AT360_ESP32D_EXPANDED",
-    "AT360_LILYGO_T_SIM7000G": "AT360_LILYGO_T_SIM7600E_V13",
+    "AT360_LILYGO_T_SIM7000G": "AT360_LILYGO_TSIM7000G",
 }
 
 
@@ -77,6 +79,6 @@ def profile_for_device(device):
         "ESP32_WROOM32_REMOTE_IO": "AT360_ESP32_WROOM32",
         "SIM808_GPS_TRACKER": "AT360_SIM808_TRACKER_2AI_2DO",
         "SIM808_SAMD21": "AT360_SIM808_TRACKER_2AI_2DO",
-        "LILYGO_T_SIM7000G_TRACKER": "AT360_LILYGO_T_SIM7600E_V13",
+        "LILYGO_T_SIM7000G_TRACKER": "AT360_LILYGO_TSIM7000G",
     }
     return get_profile(legacy.get(str(getattr(device, "device_type", "")).upper()))
