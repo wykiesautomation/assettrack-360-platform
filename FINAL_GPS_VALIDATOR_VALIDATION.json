@@ -1,0 +1,9 @@
+{
+  "source_rows": 1029,
+  "rows_after_accuracy_filter": 1027,
+  "expected_route_segments": 0,
+  "reported_nonzero_rows": 8,
+  "python_compile": "PASS",
+  "address_logic_preserved": true,
+  "road_snapping": false
+}
