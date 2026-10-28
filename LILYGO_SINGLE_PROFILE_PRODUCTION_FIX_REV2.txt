@@ -1,0 +1,10 @@
+AssetTrack 360 - LILYGO Single Profile Production Fix REV2
+Build date: 2026-10-18
+
+- Publishes one canonical LILYGO profile: AT360_LILYGO_TSIM7000G.
+- Customer-facing name: LILYGO T-SIM7000G GNSS.
+- Removes the T-SIM7600E profile, module, firmware folder and public card.
+- Corrects legacy LILYGO_T_SIM7000G_TRACKER resolution to TSIM7000G.
+- Aligns the profile with AT360_LILYGO_GNSS_REV7.
+- Includes claim-token registration and no customer GPIO outputs.
+- Keeps duplicate-card protection in the onboarding template.
