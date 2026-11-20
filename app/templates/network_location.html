@@ -1,0 +1,33 @@
+{% extends 'base.html' %}{% block title %}{{asset.name}} | Network Location{% endblock %}
+{% block head_extra %}<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"><style>.netpanel{padding:22px;margin:16px 0;border:1px solid #285267;border-radius:16px;background:#082333}.netpanel select{min-width:300px}.netmap{height:480px;border-radius:14px;background:#102b3d;overflow:hidden;position:relative}.netmap-status{position:absolute;z-index:1000;left:50%;top:16px;transform:translateX(-50%);padding:8px 12px;border-radius:9px;background:rgba(3,25,38,.92);border:1px solid #2d6078;color:#d9f4ff;font-size:13px;pointer-events:none}.netmap-status.ok{display:none}.netmap-status.error{color:#ffd38a;border-color:#b8792c}.leaflet-container{background:#102b3d}.leaflet-tile{max-width:none!important;max-height:none!important}.netfacts{display:flex;gap:24px;flex-wrap:wrap}.netfacts b{color:#a9ef35}button{cursor:pointer}</style>{% endblock %}
+{% block body %}<h1>{{asset.name}} · Network Location</h1><p>{{connectivity|replace('_',' ')}} · {{device.device_uid}}</p>
+<section class="netpanel"><form method="get" action="{{url_for('main.fleet_tracking')}}"><label>Select tracker or vehicle</label><select name="device_id" onchange="this.form.submit()">{% for item in trackers %}<option value="{{item.device.id}}" {% if item.device.id==device.id %}selected{% endif %}>{{item.asset.name}} · {{item.state}}{% if item.profile.code=='AT360_LILYGO_TCALL_SIM800L' %} · Network estimate{% endif %}</option>{% endfor %}</select><button>Open tracker</button></form><a href="{{url_for('main.asset_view',asset_id=asset.id)}}">Open I/O &amp; Device Panel</a></section>
+<section class="netpanel"><h2>OpenCellID estimated cell location, not GPS</h2><div class="netfacts"><p>OpenCellID key: <b>{{'Configured' if provider_ready else 'Required'}}</b></p><p>Location consent: <b>{{'Enabled' if consent else 'Disabled'}}</b></p><p>Towers: <b>{{state.get('cell_count',0)}}</b></p><p>Lookup: <b>{{state.get('status','WAITING_FOR_CELL_DATA')}}</b></p></div>
+<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="enable" value="{{'no' if consent else 'yes'}}"><p>Enabling sends this device's cell-tower identifiers to OpenCellID for an estimate. Use only for your own or authorised assets. OpenCellID access limits and licence terms apply.</p><button>{{'Disable network location' if consent else 'Enable authorised network location'}}</button></form>
+{% if position %}<p><strong>Last network estimate</strong> · {{position_age}} seconds old · {% if position.accuracy_m %}Provider cell range {{'%.0f'|format(position.accuracy_m)}} m, not verified device accuracy.{% else %}Cell range unavailable; device accuracy unknown.{% endif %} This is not a live GPS fix or confirmed movement.</p><div id="networkMap" class="netmap"><div id="networkMapStatus" class="netmap-status">Loading street map...</div></div><p>{{position.latitude}}, {{position.longitude}}</p>{% else %}<div class="netmap" style="display:grid;place-items:center">Location unavailable. Waiting for valid tower data, consent and provider configuration.</div>{% endif %}
+<p>Cell-location data: <a href="https://opencellid.org">OpenCellID</a>, <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>. Display adapted for AssetTrack 360. Marker is an estimated cell location, not the precise board position.</p><p>No speed, trip distance, driving score or GPS geofence decisions are derived from these estimates.</p></section>
+<section class="netpanel"><h2>Observed GSM cells</h2><table><tr><th>MCC</th><th>MNC</th><th>LAC</th><th>Cell ID</th></tr>{% for cell in state.get('cells',[]) %}<tr><td>{{cell.mobileCountryCode}}</td><td>{{cell.mobileNetworkCode}}</td><td>{{cell.locationAreaCode}}</td><td>{{cell.cellId}}</td></tr>{% else %}<tr><td colspan="4">Click READ CELL in Board Builder, then SEND NOW.</td></tr>{% endfor %}</table></section>{% endblock %}
+{% block scripts %}{% if position %}<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script>
+(function(){
+  const p={{position|tojson}};
+  const status=document.getElementById('networkMapStatus');
+  if(!window.L){if(status){status.textContent='Map library could not load.';status.classList.add('error');}return;}
+  const m=L.map('networkMap',{preferCanvas:true,zoomControl:true});
+  let fallbackStarted=false;
+  function showReady(){if(status)status.classList.add('ok');}
+  function showError(){if(status){status.textContent='Street-map tiles unavailable. Showing provider estimate on fallback map.';status.classList.add('error');}}
+  const osm=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{subdomains:['a','b','c'],maxZoom:19,crossOrigin:true,attribution:'&copy; OpenStreetMap contributors'});
+  const fallback=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,crossOrigin:true,attribution:'Tiles &copy; Esri'});
+  let loaded=false;
+  osm.on('tileload',function(){if(!loaded){loaded=true;showReady();}});
+  osm.on('tileerror',function(){if(!fallbackStarted&&!loaded){fallbackStarted=true;m.removeLayer(osm);fallback.addTo(m);showError();}});
+  fallback.on('tileload',showReady);
+  osm.addTo(m);
+  let c=null;
+  if(p.accuracy_m){c=L.circle([p.latitude,p.longitude],{radius:p.accuracy_m,color:'#ffbd65',weight:2,fillColor:'#ffbd65',fillOpacity:.18}).addTo(m);}
+  L.marker([p.latitude,p.longitude]).addTo(m).bindPopup('OpenCellID estimated cell location, not GPS');
+  if(c){m.fitBounds(c.getBounds(),{padding:[28,28],maxZoom:15});}else{m.setView([p.latitude,p.longitude],11);}
+  setTimeout(function(){m.invalidateSize(true);},250);
+  setTimeout(function(){if(!loaded&&!fallbackStarted){fallbackStarted=true;m.removeLayer(osm);fallback.addTo(m);showError();}},5000);
+})();
+</script>{% endif %}<script>setTimeout(()=>{if(!document.hidden)location.reload()},30000)</script>{% endblock %}

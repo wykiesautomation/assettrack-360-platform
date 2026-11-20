@@ -1,0 +1,12 @@
+User-agent: *
+Allow: /
+
+# Private areas
+Disallow: /admin
+Disallow: /admin/
+Disallow: /api
+Disallow: /api/
+Disallow: /account
+Disallow: /account/
+
+Sitemap: https://assettrack360.wykiesautomation.co.za/sitemap.xml
