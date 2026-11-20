@@ -1,0 +1,4 @@
+assettrack-360-platform-main/app/device_api.py
+assettrack-360-platform-main/app/network_location.py
+assettrack-360-platform-main/app/routes.py
+assettrack-360-platform-main/app/templates/network_location.html
