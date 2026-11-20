@@ -13,21 +13,25 @@
   const status=document.getElementById('networkMapStatus');
   if(!window.L){if(status){status.textContent='Map library could not load.';status.classList.add('error');}return;}
   const m=L.map('networkMap',{preferCanvas:true,zoomControl:true});
-  let fallbackStarted=false;
-  function showReady(){if(status)status.classList.add('ok');}
+  let fallbackStarted=false,loaded=false,c=null;
+  function showReady(){loaded=true;if(status)status.classList.add('ok');}
   function showError(){if(status){status.textContent='Street-map tiles unavailable. Showing provider estimate on fallback map.';status.classList.add('error');}}
   const osm=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{subdomains:['a','b','c'],maxZoom:19,crossOrigin:true,attribution:'&copy; OpenStreetMap contributors'});
   const fallback=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,crossOrigin:true,attribution:'Tiles &copy; Esri'});
-  let loaded=false;
-  osm.on('tileload',function(){if(!loaded){loaded=true;showReady();}});
+  osm.on('tileload',showReady);
   osm.on('tileerror',function(){if(!fallbackStarted&&!loaded){fallbackStarted=true;m.removeLayer(osm);fallback.addTo(m);showError();}});
   fallback.on('tileload',showReady);
+  // Set the initial view before adding circles or markers. This prevents the
+  // Leaflet Circle.js layerPointToLatLng exception seen on the live page.
+  m.setView([p.latitude,p.longitude],11);
   osm.addTo(m);
-  let c=null;
-  if(p.accuracy_m){c=L.circle([p.latitude,p.longitude],{radius:p.accuracy_m,color:'#ffbd65',weight:2,fillColor:'#ffbd65',fillOpacity:.18}).addTo(m);}
-  L.marker([p.latitude,p.longitude]).addTo(m).bindPopup('OpenCellID estimated cell location, not GPS');
-  if(c){m.fitBounds(c.getBounds(),{padding:[28,28],maxZoom:15});}else{m.setView([p.latitude,p.longitude],11);}
-  setTimeout(function(){m.invalidateSize(true);},250);
+  if(p.accuracy_m){
+    c=L.circle([p.latitude,p.longitude],{radius:p.accuracy_m,color:'#ffbd65',weight:2,fillColor:'#ffbd65',fillOpacity:.18}).addTo(m);
+    m.fitBounds(c.getBounds(),{padding:[28,28],maxZoom:15});
+  }
+  L.circleMarker([p.latitude,p.longitude],{radius:9,color:'#ffffff',weight:3,fillColor:'#00c2df',fillOpacity:1})
+    .addTo(m).bindPopup('OpenCellID estimated cell location, not GPS');
+  setTimeout(function(){m.invalidateSize(true);if(c)m.fitBounds(c.getBounds(),{padding:[28,28],maxZoom:15});},250);
   setTimeout(function(){if(!loaded&&!fallbackStarted){fallbackStarted=true;m.removeLayer(osm);fallback.addTo(m);showError();}},5000);
 })();
 </script>{% endif %}<script>setTimeout(()=>{if(!document.hidden)location.reload()},30000)</script>{% endblock %}
