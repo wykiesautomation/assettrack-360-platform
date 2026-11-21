@@ -1,0 +1,2 @@
+PASS: 64 Python files and Jinja syntax; real serving-cell identifier decoding; mocked HTTPS request; success/cache; invalid-key/not-found/quota/timeout; invalid/mismatched coordinates; missing range; consent; strict map rendering; claim/auth functions unchanged.
+NOT TESTED: live provider/key/coverage, full Flask/PostgreSQL/browser/Railway/hardware. Synthetic provider responses only in isolated tests.
