@@ -1,6 +1,0 @@
-PASS: 63 Python source parses; 93 Jinja template parses.
-PASS: six GPIO rows; unassigned and missing data; zero retained; simulated and stale not live.
-PASS: strict isolated template rendering ONLINE/DELAYED/OFFLINE/NEVER_SEEN.
-PASS: template endpoint names exist in source.
-NOT RUN: full Flask startup/API/PostgreSQL/browser/hardware/deployment.
-Synthetic objects used only in isolated tests, never shipped as telemetry.
