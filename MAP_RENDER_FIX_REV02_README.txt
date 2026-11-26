@@ -1,1 +1,0 @@
-Fixes Leaflet Circle.js layerPointToLatLng error by setting the initial map view before adding vector layers. Includes OSM tiles, Esri fallback, vector marker, range circle, and Render secret declaration. No firmware or database changes.
