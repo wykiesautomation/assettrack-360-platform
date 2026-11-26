@@ -1,0 +1,5 @@
+All backend Python syntax and Jinja template parsing PASS
+Builder Python syntax PASS; no SIM7000G references
+Customer connect template and solution registry SIM7000G cleanup PASS
+Firmware static checks only; Arduino compile, hardware and deployment NOT tested
+Removed archive entries: ['assettrack-360-platform-main/firmware/AT360_LILYGO_TSIM7000G/AssetTrack360_LILYGO_GNSS_REV7.ino', 'assettrack-360-platform-main/firmware/AT360_LILYGO_TSIM7000G/README.txt']
