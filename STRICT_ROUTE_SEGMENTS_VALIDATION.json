@@ -1,0 +1,8 @@
+{
+  "python_compile": "PASS",
+  "decisive_bypass_removed": true,
+  "minimum_consecutive_edges": 2,
+  "separate_polylines": true,
+  "endpoint_preserved": true,
+  "possible_address_preserved": true
+}
